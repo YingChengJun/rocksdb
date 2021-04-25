@@ -672,6 +672,7 @@ set(SOURCES
         memtable/skiplistrep.cc
         memtable/vectorrep.cc
         memtable/write_buffer_manager.cc
+        memtable/bp_tree_rep.cc
         monitoring/histogram.cc
         monitoring/histogram_windowing.cc
         monitoring/in_memory_stats_history.cc
@@ -1210,6 +1211,7 @@ if(WITH_TESTS)
         utilities/transactions/write_unprepared_transaction_test.cc
         utilities/ttl/ttl_test.cc
         utilities/write_batch_with_index/write_batch_with_index_test.cc
+        db/aycj_test.cpp
     )
   endif()
   if(WITH_LIBRADOS)
