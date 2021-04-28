@@ -254,6 +254,9 @@ class MemTableList {
   void PickMemtablesToFlush(const uint64_t* max_memtable_id,
                             autovector<MemTable*>* mems);
 
+  // Returns all immutable memtables that can be compaction in memory.
+  void GetMemtablesForInMemoryCompaction(autovector<MemTable*>* mems);
+
   // Reset status of the given memtable list back to pending state so that
   // they can get picked up again on the next round of flush.
   void RollbackMemtableFlush(const autovector<MemTable*>& mems,

@@ -363,6 +363,21 @@ void MemTableList::PickMemtablesToFlush(const uint64_t* max_memtable_id,
   }
 }
 
+void MemTableList::GetMemtablesForInMemoryCompaction(autovector<MemTable*>* ret) {
+  assert(ret != nullptr);
+  const auto& memlist = current_->memlist_;
+  for (auto it = memlist.begin(); it != memlist.end(); ++it) {
+    MemTable* m = *it;
+    // all other immutable memtables are compactioned in memory
+    // not been compactioned in memory
+    if (!m->in_memory_compactioned) {
+      ret->push_back(m);
+    } else {
+      break;
+    }
+  }
+}
+
 void MemTableList::RollbackMemtableFlush(const autovector<MemTable*>& mems,
                                          uint64_t /*file_number*/) {
   AutoThreadOperationStageUpdater stage_updater(

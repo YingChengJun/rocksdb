@@ -13,8 +13,10 @@
 #include "db/event_helpers.h"
 #include "monitoring/perf_context_imp.h"
 #include "options/options_helper.h"
+#include "table/merging_iterator.h"
 #include "test_util/sync_point.h"
 #include "util/cast_util.h"
+#include "db/dbformat.h"
 
 namespace ROCKSDB_NAMESPACE {
 // Convenience methods
@@ -1663,6 +1665,8 @@ void DBImpl::NotifyOnMemTableSealed(ColumnFamilyData* /*cfd*/,
 // REQUIRES: this thread is currently at the front of the 2nd writer queue if
 // two_write_queues_ is true (This is to simplify the reasoning.)
 Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
+  // Note: debug, need to delete it
+  printf("Switch MemTable!\n");
   mutex_.AssertHeld();
   WriteThread::Writer nonmem_w;
   std::unique_ptr<WritableFile> lfile;
@@ -1813,6 +1817,56 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
 
   cfd->mem()->SetNextLogNumber(logfile_number_);
   cfd->imm()->Add(cfd->mem(), &context->memtables_to_free_);
+  // Note: 在添加新的Memtable后【调度一个线程】去取出该CF中所有的imm memtable
+  // 另外调度线程的时候需要考虑锁的问题？
+  // 暂时没考虑Range Delete Table
+  if (!cfd->queued_for_flush() && !cfd->queued_for_compaction()) {
+    printf("not queued for flush or compaction!\n");
+    printf("this cf has %d imm not been flushed and %d imm been flushed!\n",
+           cfd->imm()->NumNotFlushed(), cfd->imm()->NumFlushed());
+    // find all immutable memtables
+    autovector<MemTable*> imms;
+    cfd->imm()->GetMemtablesForInMemoryCompaction(&imms);
+    if (imms.size() > 1) {
+      printf("do in memory compaction!\n");
+      // merge other imms to the oldest imm
+      auto it = imms.rbegin();
+      MemTable* merged = *it;
+      ReadOptions ro;
+      Arena arena;
+      std::vector<InternalIterator*> mem_iters;
+      for (++it; it != imms.rend(); ++it) {
+        MemTable* m = *it;
+        mem_iters.push_back(m->NewIterator(ro, &arena));
+      }
+      InternalIterator * iter =
+          NewMergingIterator(&cfd->internal_comparator(), &mem_iters[0],
+                             static_cast<int>(mem_iters.size()), &arena);
+      iter->SeekToFirst();
+      auto* parsed_key = new ParsedInternalKey();
+      while (iter->Valid()) {
+        // 这里没有考虑到后续的一些细节, 比如更新num_entries、 bloom filter等
+        // merged->Add(iter->key(), false);
+        Status parse_status = ParseInternalKey(iter->key(), parsed_key, false);
+        if (parse_status == Status::OK()) {
+          merged->Add(parsed_key->sequence, parsed_key->type, parsed_key->user_key, iter->value());
+          printf("Merging... %s\n", parsed_key->DebugString(false, false).c_str());
+        } else {
+          printf("Parse internal key error!\n");
+        }
+        iter->Next();
+      }
+      delete parsed_key;
+      // remove other imms
+
+      // add merged memtable
+
+    } else {
+      printf("not do in memory compaction!\n");
+    }
+  } else {
+    printf("queued for flush or compaction!\n");
+  }
   new_mem->Ref();
   cfd->SetMemtable(new_mem);
   InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,

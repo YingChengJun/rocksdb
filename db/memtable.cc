@@ -480,6 +480,15 @@ MemTable::MemTableStats MemTable::ApproximateStats(const Slice& start_ikey,
   return {entry_count * (data_size / n), entry_count};
 }
 
+/*
+bool MemTable::Add(Slice internal_key, bool is_type_deletion) {
+  char* buf = nullptr;
+  KeyHandle handle = table_->Allocate(internal_key.size(), &buf);
+  memcpy(buf, internal_key.data_, internal_key.size());
+  InternalKey
+}
+*/
+
 bool MemTable::Add(SequenceNumber s, ValueType type,
                    const Slice& key, /* user key */
                    const Slice& value, bool allow_concurrent,

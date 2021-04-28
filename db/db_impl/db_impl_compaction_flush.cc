@@ -2107,6 +2107,7 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
     return;
   }
   auto bg_job_limits = GetBGJobLimits();
+  // Note: 此处判断了线程池是否有高优先级的线程
   bool is_flush_pool_empty =
       env_->GetBackgroundThreads(Env::Priority::HIGH) == 0;
   while (!is_flush_pool_empty && unscheduled_flushes_ > 0 &&
@@ -2115,6 +2116,11 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
     FlushThreadArg* fta = new FlushThreadArg;
     fta->db_ = this;
     fta->thread_pri_ = Env::Priority::HIGH;
+    // Note: 此处调度了一个后台线程来执行Flush操作
+    // 第一个参数function是该线程被调度时执行的函数
+    // 第二个参数arg是要传入到函数中的参数
+    // 第三个参数是该线程的优先级
+    // 第五个参数是该线程被取消调度时执行的函数，UnscheduleFlushCallback的作用是释放fta的空间
     env_->Schedule(&DBImpl::BGWorkFlush, fta, Env::Priority::HIGH, this,
                    &DBImpl::UnscheduleFlushCallback);
     --unscheduled_flushes_;

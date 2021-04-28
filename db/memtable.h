@@ -189,6 +189,8 @@ class MemTable {
            MemTablePostProcessInfo* post_process_info = nullptr,
            void** hint = nullptr);
 
+  // bool Add(Slice internal_key, bool is_type_deletion = false);
+
   // Used to Get value associated with key or Get Merge Operands associated
   // with key.
   // If do_merge = true the default behavior which is Get value for key is
@@ -446,6 +448,14 @@ class MemTable {
   }
 #endif  // !ROCKSDB_LITE
 
+  bool InMemoryCompactioned() {
+    return in_memory_compactioned;
+  }
+
+  void SetInMemoryCompactioned() {
+    in_memory_compactioned = true;
+  }
+
  private:
   enum FlushStateEnum { FLUSH_NOT_REQUESTED, FLUSH_REQUESTED, FLUSH_SCHEDULED };
 
@@ -459,7 +469,9 @@ class MemTable {
   const size_t kArenaBlockSize;
   AllocTracker mem_tracker_;
   ConcurrentArena arena_;
+  // 存储数据的table
   std::unique_ptr<MemTableRep> table_;
+  // 范围删除table
   std::unique_ptr<MemTableRep> range_del_table_;
   std::atomic_bool is_range_del_table_empty_;
 
@@ -527,6 +539,9 @@ class MemTable {
   // keep track of memory usage in table_, arena_, and range_del_table_.
   // Gets refrshed inside `ApproximateMemoryUsage()` or `ShouldFlushNow`
   std::atomic<uint64_t> approximate_memory_usage_;
+
+  // 标记该Memtable是否已经做过in memory compaction
+  bool in_memory_compactioned = false;
 
 #ifndef ROCKSDB_LITE
   // Flush job info of the current memtable.
