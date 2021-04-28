@@ -38,7 +38,7 @@ class NoMergingMergeOp : public MergeOperator {
 
 // Compaction filter that gets stuck when it sees a particular key,
 // then gets unstuck when told to.
-// Always returns Decition::kRemove.
+// Always returns Decision::kRemove.
 class StallingFilter : public CompactionFilter {
  public:
   Decision FilterV2(int /*level*/, const Slice& key, ValueType /*type*/,
@@ -156,22 +156,31 @@ class LoggingForwardVectorIterator : public InternalIterator {
 
 class FakeCompaction : public CompactionIterator::CompactionProxy {
  public:
-  FakeCompaction() = default;
+  int level() const override { return 0; }
 
-  int level(size_t /*compaction_input_level*/) const override { return 0; }
   bool KeyNotExistsBeyondOutputLevel(
       const Slice& /*user_key*/,
       std::vector<size_t>* /*level_ptrs*/) const override {
     return is_bottommost_level || key_not_exists_beyond_output_level;
   }
+
   bool bottommost_level() const override { return is_bottommost_level; }
+
   int number_levels() const override { return 1; }
+
   Slice GetLargestUserKey() const override {
     return "\xff\xff\xff\xff\xff\xff\xff\xff\xff";
   }
+
   bool allow_ingest_behind() const override { return is_allow_ingest_behind; }
 
   bool preserve_deletes() const override { return false; }
+
+  bool enable_blob_garbage_collection() const override { return false; }
+
+  double blob_garbage_collection_age_cutoff() const override { return 0.0; }
+
+  Version* input_version() const override { return nullptr; }
 
   bool key_not_exists_beyond_output_level = false;
 
@@ -180,7 +189,7 @@ class FakeCompaction : public CompactionIterator::CompactionProxy {
   bool is_allow_ingest_behind = false;
 };
 
-// A simplifed snapshot checker which assumes each snapshot has a global
+// A simplified snapshot checker which assumes each snapshot has a global
 // last visible sequence.
 class TestSnapshotChecker : public SnapshotChecker {
  public:
@@ -702,7 +711,7 @@ TEST_P(CompactionIteratorTest, ZeroOutSequenceAtBottomLevel) {
   RunTest({test::KeyStr("a", 1, kTypeValue), test::KeyStr("b", 2, kTypeValue)},
           {"v1", "v2"},
           {test::KeyStr("a", 0, kTypeValue), test::KeyStr("b", 2, kTypeValue)},
-          {"v1", "v2"}, kMaxSequenceNumber /*last_commited_seq*/,
+          {"v1", "v2"}, kMaxSequenceNumber /*last_committed_seq*/,
           nullptr /*merge_operator*/, nullptr /*compaction_filter*/,
           true /*bottommost_level*/);
 }
@@ -711,15 +720,14 @@ TEST_P(CompactionIteratorTest, ZeroOutSequenceAtBottomLevel) {
 // permanently.
 TEST_P(CompactionIteratorTest, RemoveDeletionAtBottomLevel) {
   AddSnapshot(1);
-  RunTest({test::KeyStr("a", 1, kTypeDeletion),
-           test::KeyStr("b", 3, kTypeDeletion),
-           test::KeyStr("b", 1, kTypeValue)},
-          {"", "", ""},
-          {test::KeyStr("b", 3, kTypeDeletion),
-           test::KeyStr("b", 0, kTypeValue)},
-          {"", ""},
-          kMaxSequenceNumber /*last_commited_seq*/, nullptr /*merge_operator*/,
-          nullptr /*compaction_filter*/, true /*bottommost_level*/);
+  RunTest(
+      {test::KeyStr("a", 1, kTypeDeletion), test::KeyStr("b", 3, kTypeDeletion),
+       test::KeyStr("b", 1, kTypeValue)},
+      {"", "", ""},
+      {test::KeyStr("b", 3, kTypeDeletion), test::KeyStr("b", 0, kTypeValue)},
+      {"", ""}, kMaxSequenceNumber /*last_committed_seq*/,
+      nullptr /*merge_operator*/, nullptr /*compaction_filter*/,
+      true /*bottommost_level*/);
 }
 
 // In bottommost level, single deletions earlier than earliest snapshot can be
@@ -729,7 +737,7 @@ TEST_P(CompactionIteratorTest, RemoveSingleDeletionAtBottomLevel) {
   RunTest({test::KeyStr("a", 1, kTypeSingleDeletion),
            test::KeyStr("b", 2, kTypeSingleDeletion)},
           {"", ""}, {test::KeyStr("b", 2, kTypeSingleDeletion)}, {""},
-          kMaxSequenceNumber /*last_commited_seq*/, nullptr /*merge_operator*/,
+          kMaxSequenceNumber /*last_committed_seq*/, nullptr /*merge_operator*/,
           nullptr /*compaction_filter*/, true /*bottommost_level*/);
 }
 
@@ -886,7 +894,7 @@ TEST_F(CompactionIteratorWithSnapshotCheckerTest,
           {"v1", "v2", "v3"},
           {test::KeyStr("a", 0, kTypeValue), test::KeyStr("b", 2, kTypeValue),
            test::KeyStr("c", 3, kTypeValue)},
-          {"v1", "v2", "v3"}, kMaxSequenceNumber /*last_commited_seq*/,
+          {"v1", "v2", "v3"}, kMaxSequenceNumber /*last_committed_seq*/,
           nullptr /*merge_operator*/, nullptr /*compaction_filter*/,
           true /*bottommost_level*/);
 }
@@ -897,9 +905,7 @@ TEST_F(CompactionIteratorWithSnapshotCheckerTest,
   RunTest(
       {test::KeyStr("a", 1, kTypeDeletion), test::KeyStr("b", 2, kTypeDeletion),
        test::KeyStr("c", 3, kTypeDeletion)},
-      {"", "", ""},
-      {},
-      {"", ""}, kMaxSequenceNumber /*last_commited_seq*/,
+      {"", "", ""}, {}, {"", ""}, kMaxSequenceNumber /*last_committed_seq*/,
       nullptr /*merge_operator*/, nullptr /*compaction_filter*/,
       true /*bottommost_level*/);
 }
@@ -907,15 +913,14 @@ TEST_F(CompactionIteratorWithSnapshotCheckerTest,
 TEST_F(CompactionIteratorWithSnapshotCheckerTest,
        NotRemoveDeletionIfValuePresentToEarlierSnapshot) {
   AddSnapshot(2,1);
-  RunTest(
-      {test::KeyStr("a", 4, kTypeDeletion), test::KeyStr("a", 1, kTypeValue),
-          test::KeyStr("b", 3, kTypeValue)},
-      {"", "", ""},
-      {test::KeyStr("a", 4, kTypeDeletion), test::KeyStr("a", 0, kTypeValue),
-            test::KeyStr("b", 3, kTypeValue)},
-      {"", "", ""}, kMaxSequenceNumber /*last_commited_seq*/,
-      nullptr /*merge_operator*/, nullptr /*compaction_filter*/,
-      true /*bottommost_level*/);
+  RunTest({test::KeyStr("a", 4, kTypeDeletion),
+           test::KeyStr("a", 1, kTypeValue), test::KeyStr("b", 3, kTypeValue)},
+          {"", "", ""},
+          {test::KeyStr("a", 4, kTypeDeletion),
+           test::KeyStr("a", 0, kTypeValue), test::KeyStr("b", 3, kTypeValue)},
+          {"", "", ""}, kMaxSequenceNumber /*last_committed_seq*/,
+          nullptr /*merge_operator*/, nullptr /*compaction_filter*/,
+          true /*bottommost_level*/);
 }
 
 TEST_F(CompactionIteratorWithSnapshotCheckerTest,
@@ -927,7 +932,7 @@ TEST_F(CompactionIteratorWithSnapshotCheckerTest,
           {"", "", ""},
           {test::KeyStr("b", 2, kTypeSingleDeletion),
            test::KeyStr("c", 3, kTypeSingleDeletion)},
-          {"", ""}, kMaxSequenceNumber /*last_commited_seq*/,
+          {"", ""}, kMaxSequenceNumber /*last_committed_seq*/,
           nullptr /*merge_operator*/, nullptr /*compaction_filter*/,
           true /*bottommost_level*/);
 }
@@ -961,9 +966,24 @@ TEST_F(CompactionIteratorWithSnapshotCheckerTest,
           2 /*earliest_write_conflict_snapshot*/);
 }
 
+// Same as above but with a blob index. In addition to the value getting
+// trimmed, the type of the KV is changed to kTypeValue.
+TEST_F(CompactionIteratorWithSnapshotCheckerTest,
+       KeepSingleDeletionForWriteConflictChecking_BlobIndex) {
+  AddSnapshot(2, 0);
+  RunTest({test::KeyStr("a", 2, kTypeSingleDeletion),
+           test::KeyStr("a", 1, kTypeBlobIndex)},
+          {"", "fake_blob_index"},
+          {test::KeyStr("a", 2, kTypeSingleDeletion),
+           test::KeyStr("a", 1, kTypeValue)},
+          {"", ""}, 2 /*last_committed_seq*/, nullptr /*merge_operator*/,
+          nullptr /*compaction_filter*/, false /*bottommost_level*/,
+          2 /*earliest_write_conflict_snapshot*/);
+}
+
 // Compaction filter should keep uncommitted key as-is, and
-//   * Convert the latest velue to deletion, and/or
-//   * if latest value is a merge, apply filter to all suequent merges.
+//   * Convert the latest value to deletion, and/or
+//   * if latest value is a merge, apply filter to all subsequent merges.
 
 TEST_F(CompactionIteratorWithSnapshotCheckerTest, CompactionFilter_Value) {
   std::unique_ptr<CompactionFilter> compaction_filter(
@@ -1062,12 +1082,13 @@ class CompactionIteratorTsGcTest : public CompactionIteratorTest {
 };
 
 TEST_P(CompactionIteratorTsGcTest, NoKeyEligibleForGC) {
-  constexpr char user_key[] = "a";
+  constexpr char user_key[][2] = {{'a', '\0'}, {'b', '\0'}};
   const std::vector<std::string> input_keys = {
-      test::KeyStr(/*ts=*/103, user_key, /*seq=*/4, kTypeValue),
-      test::KeyStr(/*ts=*/102, user_key, /*seq=*/3,
-                   kTypeDeletionWithTimestamp)};
-  const std::vector<std::string> input_values = {"a3", ""};
+      test::KeyStr(/*ts=*/103, user_key[0], /*seq=*/4, kTypeValue),
+      test::KeyStr(/*ts=*/102, user_key[0], /*seq=*/3,
+                   kTypeDeletionWithTimestamp),
+      test::KeyStr(/*ts=*/104, user_key[1], /*seq=*/5, kTypeValue)};
+  const std::vector<std::string> input_values = {"a3", "", "b2"};
   std::string full_history_ts_low;
   // All keys' timestamps are newer than or equal to 102, thus none of them
   // will be eligible for GC.
@@ -1089,22 +1110,23 @@ TEST_P(CompactionIteratorTsGcTest, NoKeyEligibleForGC) {
 }
 
 TEST_P(CompactionIteratorTsGcTest, AllKeysOlderThanThreshold) {
-  constexpr char user_key[] = "a";
+  constexpr char user_key[][2] = {{'a', '\0'}, {'b', '\0'}};
   const std::vector<std::string> input_keys = {
-      test::KeyStr(/*ts=*/103, user_key, /*seq=*/4, kTypeDeletionWithTimestamp),
-      test::KeyStr(/*ts=*/102, user_key, /*seq=*/3, kTypeValue),
-      test::KeyStr(/*ts=*/101, user_key, /*seq=*/2, kTypeValue)};
-  const std::vector<std::string> input_values = {"", "a2", "a1"};
+      test::KeyStr(/*ts=*/103, user_key[0], /*seq=*/4,
+                   kTypeDeletionWithTimestamp),
+      test::KeyStr(/*ts=*/102, user_key[0], /*seq=*/3, kTypeValue),
+      test::KeyStr(/*ts=*/101, user_key[0], /*seq=*/2, kTypeValue),
+      test::KeyStr(/*ts=*/104, user_key[1], /*seq=*/5, kTypeValue)};
+  const std::vector<std::string> input_values = {"", "a2", "a1", "b5"};
   std::string full_history_ts_low;
-  // All keys' timestamps are older than 104.
-  PutFixed64(&full_history_ts_low, 104);
+  PutFixed64(&full_history_ts_low, std::numeric_limits<uint64_t>::max());
   {
     // With a snapshot at seq 3, both the deletion marker and the key at 3 must
     // be preserved.
     AddSnapshot(3);
-    const std::vector<std::string> expected_keys = {input_keys[0],
-                                                    input_keys[1]};
-    const std::vector<std::string> expected_values = {"", "a2"};
+    const std::vector<std::string> expected_keys = {
+        input_keys[0], input_keys[1], input_keys[3]};
+    const std::vector<std::string> expected_values = {"", "a2", "b5"};
     RunTest(input_keys, input_values, expected_keys, expected_values,
             /*last_committed_seq=*/kMaxSequenceNumber,
             /*merge_operator=*/nullptr, /*compaction_filter=*/nullptr,
@@ -1116,8 +1138,9 @@ TEST_P(CompactionIteratorTsGcTest, AllKeysOlderThanThreshold) {
   {
     // No snapshot, the deletion marker should be preserved because the user
     // key may appear beyond output level.
-    const std::vector<std::string> expected_keys = {input_keys[0]};
-    const std::vector<std::string> expected_values = {""};
+    const std::vector<std::string> expected_keys = {input_keys[0],
+                                                    input_keys[3]};
+    const std::vector<std::string> expected_values = {"", "b5"};
     RunTest(input_keys, input_values, expected_keys, expected_values,
             /*last_committed_seq=*/kMaxSequenceNumber,
             /*merge_operator=*/nullptr, /*compaction_filter=*/nullptr,
@@ -1128,8 +1151,8 @@ TEST_P(CompactionIteratorTsGcTest, AllKeysOlderThanThreshold) {
   {
     // No snapshot, the deletion marker can be dropped because the user key
     // does not appear in higher levels.
-    const std::vector<std::string> expected_keys = {};
-    const std::vector<std::string> expected_values = {};
+    const std::vector<std::string> expected_keys = {input_keys[3]};
+    const std::vector<std::string> expected_values = {"b5"};
     RunTest(input_keys, input_values, expected_keys, expected_values,
             /*last_committed_seq=*/kMaxSequenceNumber,
             /*merge_operator=*/nullptr, /*compaction_filter=*/nullptr,

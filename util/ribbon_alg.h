@@ -6,7 +6,9 @@
 #pragma once
 
 #include <array>
+#include <memory>
 
+#include "rocksdb/rocksdb_namespace.h"
 #include "util/math128.h"
 
 namespace ROCKSDB_NAMESPACE {
@@ -31,7 +33,7 @@ namespace ribbon {
 // (b) developed by Peter C. Dillinger, though not the first on-the-fly
 // GE algorithm. See "On the fly Gaussian Elimination for LT codes" by
 // Bioglio, Grangetto, Gaeta, and Sereno.
-// (c) TODO: not yet implemented here
+// (c) see "interleaved" solution storage below.
 //
 // See ribbon_impl.h for high-level behavioral summary. This file focuses
 // on the core design details.
@@ -242,7 +244,7 @@ namespace ribbon {
 // #################### Ribbon on-the-fly banding #######################
 //
 // "Banding" is what we call the process of reducing the inputs to an
-// upper-triangluar r-band matrix ready for finishing a solution with
+// upper-triangular r-band matrix ready for finishing a solution with
 // back-substitution. Although the DW paper presents an algorithm for
 // this ("SGauss"), the awesome properties of their construction enable
 // an even simpler, faster, and more backtrackable algorithm. In simplest
@@ -253,7 +255,7 @@ namespace ribbon {
 // The enhanced algorithm is based on these observations:
 // - When processing a coefficient row with first 1 in column j,
 //   - If it's the first at column j to be processed, it can be part of
-//     the banding at row j. (And that descision never overwritten, with
+//     the banding at row j. (And that decision never overwritten, with
 //     no loss of generality!)
 //   - Else, it can be combined with existing row j and re-processed,
 //     which will look for a later "empty" row or reach "no solution".
@@ -299,7 +301,7 @@ namespace ribbon {
 // Row-major layout is typical for boolean (bit) matrices, including for
 // MWHC (Xor) filters where a query combines k b-bit values, and k is
 // typically smaller than b. Even for k=4 and b=2, at least k=4 random
-// lookups are required regardless of layout.
+// look-ups are required regardless of layout.
 //
 // Ribbon PHSFs are quite different, however, because
 // (a) all of the solution rows relevant to a query are within a single
@@ -343,9 +345,29 @@ namespace ribbon {
 // At first glance, PHSFs only offer a whole number of bits per "slot"
 // (m rather than number of keys n), but coefficient locality in the
 // Ribbon construction makes fractional bits/key quite possible and
-// attractive for filter applications.
+// attractive for filter applications. This works by a prefix of the
+// structure using b-1 solution columns and the rest using b solution
+// columns. See InterleavedSolutionStorage below for more detail.
 //
-// TODO: more detail
+// Because false positive rates are non-linear in bits/key, this approach
+// is not quite optimal in terms of information theory. In common cases,
+// we see additional space overhead up to about 1.5% vs. theoretical
+// optimal to achieve the same FP rate. We consider this a quite acceptable
+// overhead for very efficiently utilizing space that might otherwise be
+// wasted.
+//
+// This property of Ribbon even makes it "elastic." A Ribbon filter and
+// its small metadata for answering queries can be adapted into another
+// Ribbon filter filling any smaller multiple of r bits (plus small
+// metadata), with a correspondingly higher FP rate. None of the data
+// thrown away during construction needs to be recalled for this reduction.
+// Similarly a single Ribbon construction can be separated (by solution
+// column) into two or more structures (or "layers" or "levels") with
+// independent filtering ability (no FP correlation, just as solution or
+// result columns in a single structure) despite being constructed as part
+// of a single linear system. (TODO: implement)
+// See also "ElasticBF: Fine-grained and Elastic Bloom Filter Towards
+// Efficient Read for LSM-tree-based KV Stores."
 //
 
 // ######################################################################
@@ -354,7 +376,8 @@ namespace ribbon {
 //
 // These algorithms are templatized for genericity but near-maximum
 // performance in a given application. The template parameters
-// adhere to class/struct type concepts outlined below.
+// adhere to informal class/struct type concepts outlined below. (This
+// code is written for C++11 so does not use formal C++ concepts.)
 
 // Rough architecture for these algorithms:
 //
@@ -383,7 +406,10 @@ namespace ribbon {
 //   // big enough for the largest number of columns allowed.
 //   typename ResultRow;
 //   // An unsigned integer type sufficient for representing the number of
-//   // rows in the solution structure. (TODO: verify any extra needed?)
+//   // rows in the solution structure, and at least the arithmetic
+//   // promotion size (usually 32 bits). uint32_t recommended because a
+//   // single Ribbon construction doesn't really scale to billions of
+//   // entries.
 //   typename Index;
 // };
 
@@ -413,7 +439,7 @@ namespace ribbon {
 //   // Given a hash value, return the r-bit sequence of coefficients to
 //   // associate with it. It's generally OK if
 //   //   sizeof(CoeffRow) > sizeof(Hash)
-//   // as long as the hash itself is not too prone to collsions for the
+//   // as long as the hash itself is not too prone to collisions for the
 //   // applications and the CoeffRow is generated uniformly from
 //   // available hash data, but relatively independent of the start.
 //   //
@@ -476,12 +502,13 @@ namespace ribbon {
 //   // slot index i.
 //   void Prefetch(Index i) const;
 //
-//   // Returns a pointer to CoeffRow for slot index i.
-//   CoeffRow* CoeffRowPtr(Index i);
-//
-//   // Returns a pointer to ResultRow for slot index i. (Gaussian row
-//   // operations involve both side of the equation.)
-//   ResultRow* ResultRowPtr(Index i);
+//   // Load or store CoeffRow and ResultRow for slot index i.
+//   // (Gaussian row operations involve both sides of the equation.)
+//   // Bool `for_back_subst` indicates that customizing values for
+//   // unconstrained solution rows (cr == 0) is allowed.
+//   void LoadRow(Index i, CoeffRow *cr, ResultRow *rr, bool for_back_subst)
+//        const;
+//   void StoreRow(Index i, CoeffRow cr, ResultRow rr);
 //
 //   // Returns the number of columns that can start an r-sequence of
 //   // coefficients, which is the number of slots minus r (kCoeffBits)
@@ -523,6 +550,7 @@ bool BandingAdd(BandingStorage *bs, typename BandingStorage::Index start,
                 typename BandingStorage::CoeffRow cr, BacktrackStorage *bts,
                 typename BandingStorage::Index *backtrack_pos) {
   using CoeffRow = typename BandingStorage::CoeffRow;
+  using ResultRow = typename BandingStorage::ResultRow;
   using Index = typename BandingStorage::Index;
 
   Index i = start;
@@ -532,30 +560,33 @@ bool BandingAdd(BandingStorage *bs, typename BandingStorage::Index start,
     int tz = CountTrailingZeroBits(cr);
     i += static_cast<Index>(tz);
     cr >>= tz;
-  } else {
-    assert((cr & 1) == 1);
   }
 
   for (;;) {
-    CoeffRow other = *(bs->CoeffRowPtr(i));
-    if (other == 0) {
-      *(bs->CoeffRowPtr(i)) = cr;
-      *(bs->ResultRowPtr(i)) = rr;
+    assert((cr & 1) == 1);
+    CoeffRow cr_at_i;
+    ResultRow rr_at_i;
+    bs->LoadRow(i, &cr_at_i, &rr_at_i, /* for_back_subst */ false);
+    if (cr_at_i == 0) {
+      bs->StoreRow(i, cr, rr);
       bts->BacktrackPut(*backtrack_pos, i);
       ++*backtrack_pos;
       return true;
     }
-    assert((other & 1) == 1);
-    cr ^= other;
-    rr ^= *(bs->ResultRowPtr(i));
+    assert((cr_at_i & 1) == 1);
+    // Gaussian row reduction
+    cr ^= cr_at_i;
+    rr ^= rr_at_i;
     if (cr == 0) {
       // Inconsistency or (less likely) redundancy
       break;
     }
+    // Find relative offset of next non-zero coefficient.
     int tz = CountTrailingZeroBits(cr);
     i += static_cast<Index>(tz);
     cr >>= tz;
   }
+
   // Failed, unless result row == 0 because e.g. a duplicate input or a
   // stock hash collision, with same result row. (For filter, stock hash
   // collision implies same result row.) Or we could have a full equation
@@ -651,8 +682,11 @@ bool BandingAddRange(BandingStorage *bs, BacktrackStorage *bts,
     while (backtrack_pos > 0) {
       --backtrack_pos;
       Index i = bts->BacktrackGet(backtrack_pos);
-      *(bs->CoeffRowPtr(i)) = 0;
-      // Not required: *(bs->ResultRowPtr(i)) = 0;
+      // Clearing the ResultRow is not strictly required, but is required
+      // for good FP rate on inputs that might have been backtracked out.
+      // (We don't want anything we've backtracked on to leak into final
+      // result, as that might not be "harmless".)
+      bs->StoreRow(i, 0, 0);
     }
   }
   return false;
@@ -699,19 +733,40 @@ bool BandingAddRange(BandingStorage *bs, const BandingHasher &bh,
 // for filter queries.
 
 // concept SimpleSolutionStorage extends RibbonTypes {
+//   // This is called at the beginning of back-substitution for the
+//   // solution storage to do any remaining configuration before data
+//   // is stored to it. If configuration is previously finalized, this
+//   // could be a simple assertion or even no-op. Ribbon algorithms
+//   // only call this from back-substitution, and only once per call,
+//   // before other functions here.
 //   void PrepareForNumStarts(Index num_starts) const;
+//   // Must return num_starts passed to PrepareForNumStarts, or the most
+//   // recent call to PrepareForNumStarts if this storage object can be
+//   // reused. Note that num_starts == num_slots - kCoeffBits + 1 because
+//   // there must be a run of kCoeffBits slots starting from each start.
 //   Index GetNumStarts() const;
+//   // Load the solution row (type ResultRow) for a slot
 //   ResultRow Load(Index slot_num) const;
+//   // Store the solution row (type ResultRow) for a slot
 //   void Store(Index slot_num, ResultRow data);
 // };
 
 // Back-substitution for generating a solution from BandingStorage to
 // SimpleSolutionStorage.
 template <typename SimpleSolutionStorage, typename BandingStorage>
-void SimpleBackSubst(SimpleSolutionStorage *sss, const BandingStorage &ss) {
+void SimpleBackSubst(SimpleSolutionStorage *sss, const BandingStorage &bs) {
   using CoeffRow = typename BandingStorage::CoeffRow;
   using Index = typename BandingStorage::Index;
   using ResultRow = typename BandingStorage::ResultRow;
+
+  static_assert(sizeof(Index) == sizeof(typename SimpleSolutionStorage::Index),
+                "must be same");
+  static_assert(
+      sizeof(CoeffRow) == sizeof(typename SimpleSolutionStorage::CoeffRow),
+      "must be same");
+  static_assert(
+      sizeof(ResultRow) == sizeof(typename SimpleSolutionStorage::ResultRow),
+      "must be same");
 
   constexpr auto kCoeffBits = static_cast<Index>(sizeof(CoeffRow) * 8U);
   constexpr auto kResultBits = static_cast<Index>(sizeof(ResultRow) * 8U);
@@ -722,14 +777,15 @@ void SimpleBackSubst(SimpleSolutionStorage *sss, const BandingStorage &ss) {
   std::array<CoeffRow, kResultBits> state;
   state.fill(0);
 
-  const Index num_starts = ss.GetNumStarts();
+  const Index num_starts = bs.GetNumStarts();
   sss->PrepareForNumStarts(num_starts);
   const Index num_slots = num_starts + kCoeffBits - 1;
 
   for (Index i = num_slots; i > 0;) {
     --i;
-    CoeffRow cr = *const_cast<BandingStorage &>(ss).CoeffRowPtr(i);
-    ResultRow rr = *const_cast<BandingStorage &>(ss).ResultRowPtr(i);
+    CoeffRow cr;
+    ResultRow rr;
+    bs.LoadRow(i, &cr, &rr, /* for_back_subst */ true);
     // solution row
     ResultRow sr = 0;
     for (Index j = 0; j < kResultBits; ++j) {
@@ -767,9 +823,9 @@ typename SimpleSolutionStorage::ResultRow SimpleQueryHelper(
 
   ResultRow result = 0;
   for (unsigned i = 0; i < kCoeffBits; ++i) {
-    if (static_cast<unsigned>(cr >> i) & 1U) {
-      result ^= sss.Load(start_slot + i);
-    }
+    // Bit masking whole value is generally faster here than 'if'
+    result ^= sss.Load(start_slot + i) &
+              (ResultRow{0} - (static_cast<ResultRow>(cr >> i) & ResultRow{1}));
   }
   return result;
 }
@@ -780,6 +836,13 @@ typename SimpleSolutionStorage::ResultRow SimplePhsfQuery(
     const typename PhsfQueryHasher::Key &key, const PhsfQueryHasher &hasher,
     const SimpleSolutionStorage &sss) {
   const typename PhsfQueryHasher::Hash hash = hasher.GetHash(key);
+
+  static_assert(sizeof(typename SimpleSolutionStorage::Index) ==
+                    sizeof(typename PhsfQueryHasher::Index),
+                "must be same");
+  static_assert(sizeof(typename SimpleSolutionStorage::CoeffRow) ==
+                    sizeof(typename PhsfQueryHasher::CoeffRow),
+                "must be same");
 
   return SimpleQueryHelper(hasher.GetStart(hash, sss.GetNumStarts()),
                            hasher.GetCoeffRow(hash), sss);
@@ -794,6 +857,16 @@ bool SimpleFilterQuery(const typename FilterQueryHasher::Key &key,
   const typename SimpleSolutionStorage::ResultRow expected =
       hasher.GetResultRowFromHash(hash);
 
+  static_assert(sizeof(typename SimpleSolutionStorage::Index) ==
+                    sizeof(typename FilterQueryHasher::Index),
+                "must be same");
+  static_assert(sizeof(typename SimpleSolutionStorage::CoeffRow) ==
+                    sizeof(typename FilterQueryHasher::CoeffRow),
+                "must be same");
+  static_assert(sizeof(typename SimpleSolutionStorage::ResultRow) ==
+                    sizeof(typename FilterQueryHasher::ResultRow),
+                "must be same");
+
   return expected ==
          SimpleQueryHelper(hasher.GetStart(hash, sss.GetNumStarts()),
                            hasher.GetCoeffRow(hash), sss);
@@ -803,18 +876,349 @@ bool SimpleFilterQuery(const typename FilterQueryHasher::Key &key,
 
 // InterleavedSolutionStorage is row-major at a high level, for good
 // locality, and column-major at a low level, for CPU efficiency
-// especially in filter querys or relatively small number of result bits
+// especially in filter queries or relatively small number of result bits
 // (== solution columns). The storage is a sequence of "blocks" where a
-// block has one CoeffRow for each solution column.
-
+// block has one CoeffRow-sized segment for each solution column. Each
+// query spans at most two blocks; the starting solution row is typically
+// in the row-logical middle of a block and spans to the middle of the
+// next block. (See diagram below.)
+//
+// InterleavedSolutionStorage supports choosing b (number of result or
+// solution columns) at run time, and even supports mixing b and b-1 solution
+// columns in a single linear system solution, for filters that can
+// effectively utilize any size space (multiple of CoeffRow) for minimizing
+// FP rate for any number of added keys. To simplify query implementation
+// (with lower-index columns first), the b-bit portion comes after the b-1
+// portion of the structure.
+//
+// Diagram (=== marks logical block boundary; b=4; ### is data used by a
+// query crossing the b-1 to b boundary, each Segment has type CoeffRow):
+//  ...
+// +======================+
+// | S e g m e n t  col=0 |
+// +----------------------+
+// | S e g m e n t  col=1 |
+// +----------------------+
+// | S e g m e n t  col=2 |
+// +======================+
+// | S e g m e n #########|
+// +----------------------+
+// | S e g m e n #########|
+// +----------------------+
+// | S e g m e n #########|
+// +======================+ Result/solution columns: above = 3, below = 4
+// |#############t  col=0 |
+// +----------------------+
+// |#############t  col=1 |
+// +----------------------+
+// |#############t  col=2 |
+// +----------------------+
+// | S e g m e n t  col=3 |
+// +======================+
+// | S e g m e n t  col=0 |
+// +----------------------+
+// | S e g m e n t  col=1 |
+// +----------------------+
+// | S e g m e n t  col=2 |
+// +----------------------+
+// | S e g m e n t  col=3 |
+// +======================+
+//  ...
+//
+// InterleavedSolutionStorage will be adapted by the algorithms from
+// simple array-like segment storage. That array-like storage is templatized
+// in part so that an implementation may choose to handle byte ordering
+// at access time.
+//
 // concept InterleavedSolutionStorage extends RibbonTypes {
-//   Index GetNumColumns() const;
+//   // This is called at the beginning of back-substitution for the
+//   // solution storage to do any remaining configuration before data
+//   // is stored to it. If configuration is previously finalized, this
+//   // could be a simple assertion or even no-op. Ribbon algorithms
+//   // only call this from back-substitution, and only once per call,
+//   // before other functions here.
+//   void PrepareForNumStarts(Index num_starts) const;
+//   // Must return num_starts passed to PrepareForNumStarts, or the most
+//   // recent call to PrepareForNumStarts if this storage object can be
+//   // reused. Note that num_starts == num_slots - kCoeffBits + 1 because
+//   // there must be a run of kCoeffBits slots starting from each start.
 //   Index GetNumStarts() const;
-//   CoeffRow Load(Index block_num, Index column) const;
-//   void Store(Index block_num, Index column, CoeffRow data);
+//   // The larger number of solution columns used (called "b" above).
+//   Index GetUpperNumColumns() const;
+//   // If returns > 0, then block numbers below that use
+//   // GetUpperNumColumns() - 1 columns per solution row, and the rest
+//   // use GetUpperNumColumns(). A block represents kCoeffBits "slots",
+//   // where all but the last kCoeffBits - 1 slots are also starts. And
+//   // a block contains a segment for each solution column.
+//   // An implementation may only support uniform columns per solution
+//   // row and return constant 0 here.
+//   Index GetUpperStartBlock() const;
+//
+//   // ### "Array of segments" portion of API ###
+//   // The number of values of type CoeffRow used in this solution
+//   // representation. (This value can be inferred from the previous
+//   // three functions, but is expected at least for sanity / assertion
+//   // checking.)
+//   Index GetNumSegments() const;
+//   // Load an entry from the logical array of segments
+//   CoeffRow LoadSegment(Index segment_num) const;
+//   // Store an entry to the logical array of segments
+//   void StoreSegment(Index segment_num, CoeffRow data);
 // };
 
-// TODO: not yet implemented here (only in prototype code elsewhere)
+// A helper for InterleavedBackSubst.
+template <typename BandingStorage>
+inline void BackSubstBlock(typename BandingStorage::CoeffRow *state,
+                           typename BandingStorage::Index num_columns,
+                           const BandingStorage &bs,
+                           typename BandingStorage::Index start_slot) {
+  using CoeffRow = typename BandingStorage::CoeffRow;
+  using Index = typename BandingStorage::Index;
+  using ResultRow = typename BandingStorage::ResultRow;
+
+  constexpr auto kCoeffBits = static_cast<Index>(sizeof(CoeffRow) * 8U);
+
+  for (Index i = start_slot + kCoeffBits; i > start_slot;) {
+    --i;
+    CoeffRow cr;
+    ResultRow rr;
+    bs.LoadRow(i, &cr, &rr, /* for_back_subst */ true);
+    for (Index j = 0; j < num_columns; ++j) {
+      // Compute next solution bit at row i, column j (see derivation below)
+      CoeffRow tmp = state[j] << 1;
+      int bit = BitParity(tmp & cr) ^ ((rr >> j) & 1);
+      tmp |= static_cast<CoeffRow>(bit);
+
+      // Now tmp is solution at column j from row i for next kCoeffBits
+      // more rows. Thus, for valid solution, the dot product of the
+      // solution column with the coefficient row has to equal the result
+      // at that column,
+      //   BitParity(tmp & cr) == ((rr >> j) & 1)
+
+      // Update state.
+      state[j] = tmp;
+    }
+  }
+}
+
+// Back-substitution for generating a solution from BandingStorage to
+// InterleavedSolutionStorage.
+template <typename InterleavedSolutionStorage, typename BandingStorage>
+void InterleavedBackSubst(InterleavedSolutionStorage *iss,
+                          const BandingStorage &bs) {
+  using CoeffRow = typename BandingStorage::CoeffRow;
+  using Index = typename BandingStorage::Index;
+
+  static_assert(
+      sizeof(Index) == sizeof(typename InterleavedSolutionStorage::Index),
+      "must be same");
+  static_assert(
+      sizeof(CoeffRow) == sizeof(typename InterleavedSolutionStorage::CoeffRow),
+      "must be same");
+
+  constexpr auto kCoeffBits = static_cast<Index>(sizeof(CoeffRow) * 8U);
+
+  const Index num_starts = bs.GetNumStarts();
+  // Although it might be nice to have a filter that returns "always false"
+  // when no key is added, we aren't specifically supporting that here
+  // because it would require another condition branch in the query.
+  assert(num_starts > 0);
+  iss->PrepareForNumStarts(num_starts);
+
+  const Index num_slots = num_starts + kCoeffBits - 1;
+  assert(num_slots % kCoeffBits == 0);
+  const Index num_blocks = num_slots / kCoeffBits;
+  const Index num_segments = iss->GetNumSegments();
+
+  // For now upper, then lower
+  Index num_columns = iss->GetUpperNumColumns();
+  const Index upper_start_block = iss->GetUpperStartBlock();
+
+  if (num_columns == 0) {
+    // Nothing to do, presumably because there's not enough space for even
+    // a single segment.
+    assert(num_segments == 0);
+    // When num_columns == 0, a Ribbon filter query will always return true,
+    // or a PHSF query always 0.
+    return;
+  }
+
+  // We should be utilizing all available segments
+  assert(num_segments == (upper_start_block * (num_columns - 1)) +
+                             ((num_blocks - upper_start_block) * num_columns));
+
+  // TODO: consider fixed-column specializations with stack-allocated state
+
+  // A column-major buffer of the solution matrix, containing enough
+  // recently-computed solution data to compute the next solution row
+  // (based also on banding data).
+  std::unique_ptr<CoeffRow[]> state{new CoeffRow[num_columns]()};
+
+  Index block = num_blocks;
+  Index segment_num = num_segments;
+  while (block > upper_start_block) {
+    --block;
+    BackSubstBlock(state.get(), num_columns, bs, block * kCoeffBits);
+    segment_num -= num_columns;
+    for (Index i = 0; i < num_columns; ++i) {
+      iss->StoreSegment(segment_num + i, state[i]);
+    }
+  }
+  // Now (if applicable), region using lower number of columns
+  // (This should be optimized away if GetUpperStartBlock() returns
+  // constant 0.)
+  --num_columns;
+  while (block > 0) {
+    --block;
+    BackSubstBlock(state.get(), num_columns, bs, block * kCoeffBits);
+    segment_num -= num_columns;
+    for (Index i = 0; i < num_columns; ++i) {
+      iss->StoreSegment(segment_num + i, state[i]);
+    }
+  }
+  // Verify everything processed
+  assert(block == 0);
+  assert(segment_num == 0);
+}
+
+// Prefetch memory for a key in InterleavedSolutionStorage.
+template <typename InterleavedSolutionStorage, typename PhsfQueryHasher>
+inline void InterleavedPrepareQuery(
+    const typename PhsfQueryHasher::Key &key, const PhsfQueryHasher &hasher,
+    const InterleavedSolutionStorage &iss,
+    typename PhsfQueryHasher::Hash *saved_hash,
+    typename InterleavedSolutionStorage::Index *saved_segment_num,
+    typename InterleavedSolutionStorage::Index *saved_num_columns,
+    typename InterleavedSolutionStorage::Index *saved_start_bit) {
+  using Hash = typename PhsfQueryHasher::Hash;
+  using CoeffRow = typename InterleavedSolutionStorage::CoeffRow;
+  using Index = typename InterleavedSolutionStorage::Index;
+
+  static_assert(sizeof(Index) == sizeof(typename PhsfQueryHasher::Index),
+                "must be same");
+
+  const Hash hash = hasher.GetHash(key);
+  const Index start_slot = hasher.GetStart(hash, iss.GetNumStarts());
+
+  constexpr auto kCoeffBits = static_cast<Index>(sizeof(CoeffRow) * 8U);
+
+  const Index upper_start_block = iss.GetUpperStartBlock();
+  Index num_columns = iss.GetUpperNumColumns();
+  Index start_block_num = start_slot / kCoeffBits;
+  Index segment_num = start_block_num * num_columns -
+                      std::min(start_block_num, upper_start_block);
+  // Change to lower num columns if applicable.
+  // (This should not compile to a conditional branch.)
+  num_columns -= (start_block_num < upper_start_block) ? 1 : 0;
+
+  Index start_bit = start_slot % kCoeffBits;
+
+  Index segment_count = num_columns + (start_bit == 0 ? 0 : num_columns);
+
+  iss.PrefetchSegmentRange(segment_num, segment_num + segment_count);
+
+  *saved_hash = hash;
+  *saved_segment_num = segment_num;
+  *saved_num_columns = num_columns;
+  *saved_start_bit = start_bit;
+}
+
+// General PHSF query from InterleavedSolutionStorage, using data for
+// the query key from InterleavedPrepareQuery
+template <typename InterleavedSolutionStorage, typename PhsfQueryHasher>
+inline typename InterleavedSolutionStorage::ResultRow InterleavedPhsfQuery(
+    typename PhsfQueryHasher::Hash hash,
+    typename InterleavedSolutionStorage::Index segment_num,
+    typename InterleavedSolutionStorage::Index num_columns,
+    typename InterleavedSolutionStorage::Index start_bit,
+    const PhsfQueryHasher &hasher, const InterleavedSolutionStorage &iss) {
+  using CoeffRow = typename InterleavedSolutionStorage::CoeffRow;
+  using Index = typename InterleavedSolutionStorage::Index;
+  using ResultRow = typename InterleavedSolutionStorage::ResultRow;
+
+  static_assert(sizeof(Index) == sizeof(typename PhsfQueryHasher::Index),
+                "must be same");
+  static_assert(sizeof(CoeffRow) == sizeof(typename PhsfQueryHasher::CoeffRow),
+                "must be same");
+
+  constexpr auto kCoeffBits = static_cast<Index>(sizeof(CoeffRow) * 8U);
+
+  const CoeffRow cr = hasher.GetCoeffRow(hash);
+
+  ResultRow sr = 0;
+  const CoeffRow cr_left = cr << static_cast<unsigned>(start_bit);
+  for (Index i = 0; i < num_columns; ++i) {
+    sr ^= BitParity(iss.LoadSegment(segment_num + i) & cr_left) << i;
+  }
+
+  if (start_bit > 0) {
+    segment_num += num_columns;
+    const CoeffRow cr_right =
+        cr >> static_cast<unsigned>(kCoeffBits - start_bit);
+    for (Index i = 0; i < num_columns; ++i) {
+      sr ^= BitParity(iss.LoadSegment(segment_num + i) & cr_right) << i;
+    }
+  }
+
+  return sr;
+}
+
+// Filter query a key from InterleavedFilterQuery.
+template <typename InterleavedSolutionStorage, typename FilterQueryHasher>
+inline bool InterleavedFilterQuery(
+    typename FilterQueryHasher::Hash hash,
+    typename InterleavedSolutionStorage::Index segment_num,
+    typename InterleavedSolutionStorage::Index num_columns,
+    typename InterleavedSolutionStorage::Index start_bit,
+    const FilterQueryHasher &hasher, const InterleavedSolutionStorage &iss) {
+  using CoeffRow = typename InterleavedSolutionStorage::CoeffRow;
+  using Index = typename InterleavedSolutionStorage::Index;
+  using ResultRow = typename InterleavedSolutionStorage::ResultRow;
+
+  static_assert(sizeof(Index) == sizeof(typename FilterQueryHasher::Index),
+                "must be same");
+  static_assert(
+      sizeof(CoeffRow) == sizeof(typename FilterQueryHasher::CoeffRow),
+      "must be same");
+  static_assert(
+      sizeof(ResultRow) == sizeof(typename FilterQueryHasher::ResultRow),
+      "must be same");
+
+  constexpr auto kCoeffBits = static_cast<Index>(sizeof(CoeffRow) * 8U);
+
+  const CoeffRow cr = hasher.GetCoeffRow(hash);
+  const ResultRow expected = hasher.GetResultRowFromHash(hash);
+
+  // TODO: consider optimizations such as
+  // * get rid of start_bit == 0 condition with careful fetching & shifting
+  if (start_bit == 0) {
+    for (Index i = 0; i < num_columns; ++i) {
+      if (BitParity(iss.LoadSegment(segment_num + i) & cr) !=
+          (static_cast<int>(expected >> i) & 1)) {
+        return false;
+      }
+    }
+  } else {
+    const CoeffRow cr_left = cr << static_cast<unsigned>(start_bit);
+    const CoeffRow cr_right =
+        cr >> static_cast<unsigned>(kCoeffBits - start_bit);
+
+    for (Index i = 0; i < num_columns; ++i) {
+      CoeffRow soln_data =
+          (iss.LoadSegment(segment_num + i) & cr_left) ^
+          (iss.LoadSegment(segment_num + num_columns + i) & cr_right);
+      if (BitParity(soln_data) != (static_cast<int>(expected >> i) & 1)) {
+        return false;
+      }
+    }
+  }
+  // otherwise, all match
+  return true;
+}
+
+// TODO: refactor Interleaved*Query so that queries can be "prepared" by
+// prefetching memory, to hide memory latency for multiple queries in a
+// single thread.
 
 }  // namespace ribbon
 

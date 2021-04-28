@@ -248,12 +248,6 @@ Compaction::Compaction(VersionStorageInfo* vstorage,
   if (max_subcompactions_ == 0) {
     max_subcompactions_ = _mutable_db_options.max_subcompactions;
   }
-  if (!bottommost_level_) {
-    // Currently we only enable dictionary compression during compaction to the
-    // bottommost level.
-    output_compression_opts_.max_dict_bytes = 0;
-    output_compression_opts_.zstd_max_train_bytes = 0;
-  }
 
 #ifndef NDEBUG
   for (size_t i = 1; i < inputs_.size(); ++i) {
@@ -525,7 +519,7 @@ uint64_t Compaction::OutputFilePreallocationSize() const {
 
   // Over-estimate slightly so we don't end up just barely crossing
   // the threshold
-  // No point to prellocate more than 1GB.
+  // No point to preallocate more than 1GB.
   return std::min(uint64_t{1073741824},
                   preallocation_size + (preallocation_size / 10));
 }

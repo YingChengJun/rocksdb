@@ -118,8 +118,13 @@ enum class FlushReason : int {
   // When set the flush reason to kErrorRecoveryRetryFlush, SwitchMemtable
   // will not be called to avoid many small immutable memtables.
   kErrorRecoveryRetryFlush = 0xc,
+  kWalFull = 0xd,
 };
 
+// TODO: In the future, BackgroundErrorReason will only be used to indicate
+// why the BG Error is happening (e.g., flush, compaction). We may introduce
+// other data structure to indicate other essential information such as
+// the file type (e.g., Manifest, SST) and special context.
 enum class BackgroundErrorReason {
   kFlush,
   kCompaction,
@@ -127,6 +132,7 @@ enum class BackgroundErrorReason {
   kMemTable,
   kManifestWrite,
   kFlushNoWAL,
+  kManifestWriteNoWAL,
 };
 
 enum class WriteStallCondition {

@@ -15,8 +15,9 @@
 #include "file/filename.h"
 #include "port/sys_time.h"
 #include "rocksdb/file_system.h"
+#include "test_util/sync_point.h"
 #include "util/cast_util.h"
-#include "util/murmurhash.h"
+#include "util/hash.h"
 #include "util/random.h"
 #include "util/rate_limiter.h"
 
@@ -32,8 +33,7 @@ class MemFile {
         locked_(false),
         size_(0),
         modified_time_(Now()),
-        rnd_(static_cast<uint32_t>(
-            MurmurHash(fn.data(), static_cast<int>(fn.size()), 0))),
+        rnd_(Lower32of64(GetSliceNPHash64(fn))),
         fsynced_bytes_(0) {}
   // No copying allowed.
   MemFile(const MemFile&) = delete;
@@ -106,6 +106,15 @@ class MemFile {
 
   IOStatus Read(uint64_t offset, size_t n, const IOOptions& /*options*/,
                 Slice* result, char* scratch, IODebugContext* /*dbg*/) const {
+    {
+      IOStatus s;
+      TEST_SYNC_POINT_CALLBACK("MemFile::Read:IOStatus", &s);
+      if (!s.ok()) {
+        // with sync point only
+        *result = Slice();
+        return s;
+      }
+    }
     MutexLock lock(&mutex_);
     const uint64_t available = Size() - std::min(Size(), offset);
     size_t offset_ = static_cast<size_t>(offset);
@@ -601,7 +610,7 @@ class MockFileSystem : public FileSystem {
 
   std::string NormalizeMockPath(const std::string& path) {
     std::string p = NormalizePath(path);
-    if (p.back() == '/' && p.size() > 1) {
+    if (p.back() == kFilePathSeparator && p.size() > 1) {
       p.pop_back();
     }
     return p;
@@ -715,11 +724,12 @@ IOStatus MockFileSystem::ReopenWritableFile(
   MemFile* file = nullptr;
   if (file_map_.find(fn) == file_map_.end()) {
     file = new MemFile(env_, fn, false);
+    // Only take a reference when we create the file objectt
+    file->Ref();
     file_map_[fn] = file;
   } else {
     file = file_map_[fn];
   }
-  file->Ref();
   if (file_opts.use_direct_writes && !supports_direct_io_) {
     return IOStatus::NotSupported("Direct I/O Not Supported");
   } else {
@@ -1024,26 +1034,43 @@ Status MockFileSystem::CorruptBuffer(const std::string& fname) {
   iter->second->CorruptBuffer();
   return Status::OK();
 }
+namespace {
+class MockSystemClock : public SystemClockWrapper {
+ public:
+  explicit MockSystemClock(const std::shared_ptr<SystemClock>& c)
+      : SystemClockWrapper(c), fake_sleep_micros_(0) {}
 
-MockEnv::MockEnv(Env* base_env)
-    : CompositeEnvWrapper(base_env, std::make_shared<MockFileSystem>(this)),
-      fake_sleep_micros_(0) {}
-
-Status MockEnv::GetCurrentTime(int64_t* unix_time) {
-  auto s = CompositeEnvWrapper::GetCurrentTime(unix_time);
-  if (s.ok()) {
-    *unix_time += fake_sleep_micros_.load() / (1000 * 1000);
+  void FakeSleepForMicroseconds(int64_t micros) {
+    fake_sleep_micros_.fetch_add(micros);
   }
-  return s;
-}
 
-uint64_t MockEnv::NowMicros() {
-  return CompositeEnvWrapper::NowMicros() + fake_sleep_micros_.load();
-}
+  const char* Name() const override { return "MockSystemClock"; }
 
-uint64_t MockEnv::NowNanos() {
-  return CompositeEnvWrapper::NowNanos() + fake_sleep_micros_.load() * 1000;
-}
+  Status GetCurrentTime(int64_t* unix_time) override {
+    auto s = SystemClockWrapper::GetCurrentTime(unix_time);
+    if (s.ok()) {
+      auto fake_time = fake_sleep_micros_.load() / (1000 * 1000);
+      *unix_time += fake_time;
+    }
+    return s;
+  }
+
+  uint64_t NowMicros() override {
+    return SystemClockWrapper::NowMicros() + fake_sleep_micros_.load();
+  }
+
+  uint64_t NowNanos() override {
+    return SystemClockWrapper::NowNanos() + fake_sleep_micros_.load() * 1000;
+  }
+
+ private:
+  std::atomic<int64_t> fake_sleep_micros_;
+};
+}  // namespace
+MockEnv::MockEnv(Env* base_env)
+    : CompositeEnvWrapper(
+          base_env, std::make_shared<MockFileSystem>(this),
+          std::make_shared<MockSystemClock>(base_env->GetSystemClock())) {}
 
 Status MockEnv::CorruptBuffer(const std::string& fname) {
   auto mock = static_cast_with_check<MockFileSystem>(GetFileSystem().get());
@@ -1051,7 +1078,8 @@ Status MockEnv::CorruptBuffer(const std::string& fname) {
 }
 
 void MockEnv::FakeSleepForMicroseconds(int64_t micros) {
-  fake_sleep_micros_.fetch_add(micros);
+  auto mock = static_cast_with_check<MockSystemClock>(GetSystemClock().get());
+  mock->FakeSleepForMicroseconds(micros);
 }
 
 #ifndef ROCKSDB_LITE

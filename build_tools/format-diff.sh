@@ -52,15 +52,16 @@ else
     else
       echo "You didn't have clang-format-diff.py and/or clang-format available in your computer!"
       echo "You can download clang-format-diff.py by running: "
-      echo "    curl --location http://goo.gl/iUW1u2 -o ${CLANG_FORMAT_DIFF}"
+      echo "    curl --location https://raw.githubusercontent.com/llvm/llvm-project/main/clang/tools/clang-format/clang-format-diff.py -o ${REPO_ROOT}/clang-format-diff.py"
+      echo "You should make sure the downloaded script is not compromised."
       echo "You can download clang-format by running:"
       echo "    brew install clang-format"
       echo "  Or"
       echo "    apt install clang-format"
       echo "  This might work too:"
       echo "    yum install git-clang-format"
-      echo "Then, move both files (i.e. ${CLANG_FORMAT_DIFF} and clang-format) to some directory within PATH=${PATH}"
-      echo "and make sure ${CLANG_FORMAT_DIFF} is executable."
+      echo "Then make sure clang-format is available and executable from \$PATH:"
+      echo "    clang-format --version"
       exit 128
     fi
     # Check argparse pre-req on interpreter, or it will fail
@@ -82,7 +83,8 @@ else
       echo "You have clang-format-diff.py for Python 2 but are using a Python 3"
       echo "interpreter (${PYTHON:-python3})."
       echo "You can download clang-format-diff.py for Python 3 by running: "
-      echo "    curl --location http://goo.gl/iUW1u2 -o ${REPO_ROOT}/clang-format-diff.py"
+      echo "    curl --location https://raw.githubusercontent.com/llvm/llvm-project/main/clang/tools/clang-format/clang-format-diff.py -o ${REPO_ROOT}/clang-format-diff.py"
+      echo "You should make sure the downloaded script is not compromised."
       exit 130
     fi
     CLANG_FORMAT_DIFF="${PYTHON:-python3} $CFD_PATH"
@@ -134,9 +136,11 @@ then
   FORMAT_UPSTREAM_MERGE_BASE="$(git merge-base "$FORMAT_UPSTREAM" HEAD)"
   # Get the differences
   diffs=$(git diff -U0 "$FORMAT_UPSTREAM_MERGE_BASE" | $CLANG_FORMAT_DIFF -p 1)
+  echo "Checking format of changes not yet in $FORMAT_UPSTREAM..."
 else
   # Check the format of uncommitted lines,
   diffs=$(git diff -U0 HEAD | $CLANG_FORMAT_DIFF -p 1)
+  echo "Checking format of uncommitted changes..."
 fi
 
 if [ -z "$diffs" ]

@@ -41,6 +41,7 @@ extern const uint64_t kPlainTableMagicNumber;
 const uint64_t kLegacyPlainTableMagicNumber = 0;
 const uint64_t kPlainTableMagicNumber = 0;
 #endif
+const char* kHostnameForDbHostId = "__hostname__";
 
 bool ShouldReportDetailedTime(Env* env, Statistics* stats) {
   return env != nullptr && stats != nullptr &&
@@ -306,8 +307,9 @@ Status ReadFooterFromFile(const IOOptions& opts, RandomAccessFileReader* file,
   // for iterator, TryReadFromCache might do a readahead. Revisit to see if we
   // need to pass a timeout at that point
   if (prefetch_buffer == nullptr ||
-      !prefetch_buffer->TryReadFromCache(
-          IOOptions(), read_offset, Footer::kMaxEncodedLength, &footer_input)) {
+      !prefetch_buffer->TryReadFromCache(IOOptions(), read_offset,
+                                         Footer::kMaxEncodedLength,
+                                         &footer_input, nullptr)) {
     if (file->use_direct_io()) {
       s = file->Read(opts, read_offset, Footer::kMaxEncodedLength,
                      &footer_input, nullptr, &internal_buf);
@@ -351,8 +353,8 @@ Status UncompressBlockContentsForCompressionType(
   assert(uncompression_info.type() != kNoCompression &&
          "Invalid compression type");
 
-  StopWatchNano timer(ioptions.env, ShouldReportDetailedTime(
-                                        ioptions.env, ioptions.statistics));
+  StopWatchNano timer(ioptions.clock,
+                      ShouldReportDetailedTime(ioptions.env, ioptions.stats));
   size_t uncompressed_size = 0;
   CacheAllocationPtr ubuf =
       UncompressData(uncompression_info, data, n, &uncompressed_size,
@@ -365,13 +367,13 @@ Status UncompressBlockContentsForCompressionType(
 
   *contents = BlockContents(std::move(ubuf), uncompressed_size);
 
-  if (ShouldReportDetailedTime(ioptions.env, ioptions.statistics)) {
-    RecordTimeToHistogram(ioptions.statistics, DECOMPRESSION_TIMES_NANOS,
+  if (ShouldReportDetailedTime(ioptions.env, ioptions.stats)) {
+    RecordTimeToHistogram(ioptions.stats, DECOMPRESSION_TIMES_NANOS,
                           timer.ElapsedNanos());
   }
-  RecordTimeToHistogram(ioptions.statistics, BYTES_DECOMPRESSED,
+  RecordTimeToHistogram(ioptions.stats, BYTES_DECOMPRESSED,
                         contents->data.size());
-  RecordTick(ioptions.statistics, NUMBER_BLOCK_DECOMPRESSED);
+  RecordTick(ioptions.stats, NUMBER_BLOCK_DECOMPRESSED);
 
   TEST_SYNC_POINT_CALLBACK(
       "UncompressBlockContentsForCompressionType:TamperWithReturnValue",

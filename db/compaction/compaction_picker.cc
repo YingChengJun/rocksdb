@@ -139,11 +139,9 @@ CompressionOptions GetCompressionOptions(const MutableCFOptions& cf_options,
   if (!enable_compression) {
     return cf_options.compression_opts;
   }
-  // If bottommost_compression is set and we are compacting to the
-  // bottommost level then we should use the specified compression options
-  // for the bottmomost_compression.
-  if (cf_options.bottommost_compression != kDisableCompressionOption &&
-      level >= (vstorage->num_non_empty_levels() - 1) &&
+  // If bottommost_compression_opts is enabled and we are compacting to the
+  // bottommost level then we should use the specified compression options.
+  if (level >= (vstorage->num_non_empty_levels() - 1) &&
       cf_options.bottommost_compression_opts.enabled) {
     return cf_options.bottommost_compression_opts;
   }
@@ -532,7 +530,7 @@ bool CompactionPicker::SetupOtherInputs(
       }
     }
     if (expand_inputs) {
-      ROCKS_LOG_INFO(ioptions_.info_log,
+      ROCKS_LOG_INFO(ioptions_.logger,
                      "[%s] Expanding@%d %" ROCKSDB_PRIszt "+%" ROCKSDB_PRIszt
                      "(%" PRIu64 "+%" PRIu64 " bytes) to %" ROCKSDB_PRIszt
                      "+%" ROCKSDB_PRIszt " (%" PRIu64 "+%" PRIu64 " bytes)\n",
@@ -1006,6 +1004,7 @@ Status CompactionPicker::SanitizeCompactionInputFiles(
   // any currently-existing files.
   for (auto file_num : *input_files) {
     bool found = false;
+    int input_file_level = -1;
     for (const auto& level_meta : cf_meta.levels) {
       for (const auto& file_meta : level_meta.files) {
         if (file_num == TableFileNameToNumber(file_meta.name)) {
@@ -1015,6 +1014,7 @@ Status CompactionPicker::SanitizeCompactionInputFiles(
                                    " is already being compacted.");
           }
           found = true;
+          input_file_level = level_meta.level;
           break;
         }
       }
@@ -1026,6 +1026,13 @@ Status CompactionPicker::SanitizeCompactionInputFiles(
       return Status::InvalidArgument(
           "Specified compaction input file " + MakeTableFileName("", file_num) +
           " does not exist in column family " + cf_meta.name + ".");
+    }
+    if (input_file_level > output_level) {
+      return Status::InvalidArgument(
+          "Cannot compact file to up level, input file: " +
+          MakeTableFileName("", file_num) + " level " +
+          ToString(input_file_level) + " > output level " +
+          ToString(output_level));
     }
   }
 
@@ -1045,6 +1052,8 @@ void CompactionPicker::RegisterCompaction(Compaction* c) {
     level0_compactions_in_progress_.insert(c);
   }
   compactions_in_progress_.insert(c);
+  TEST_SYNC_POINT_CALLBACK("CompactionPicker::RegisterCompaction:Registered",
+                           c);
 }
 
 void CompactionPicker::UnregisterCompaction(Compaction* c) {

@@ -44,6 +44,10 @@ struct Unsigned128 {
   explicit operator uint64_t() { return lo; }
 
   explicit operator uint32_t() { return static_cast<uint32_t>(lo); }
+
+  explicit operator uint16_t() { return static_cast<uint16_t>(lo); }
+
+  explicit operator uint8_t() { return static_cast<uint8_t>(lo); }
 };
 
 inline Unsigned128 operator<<(const Unsigned128& lhs, unsigned shift) {
@@ -211,7 +215,7 @@ inline int BitsSetToOne(Unsigned128 v) {
 
 template <>
 inline int BitParity(Unsigned128 v) {
-  return BitParity(Lower64of128(v)) ^ BitParity(Upper64of128(v));
+  return BitParity(Lower64of128(v) ^ Upper64of128(v));
 }
 
 template <typename T>

@@ -486,7 +486,7 @@ Compaction* UniversalCompactionBuilder::PickCompaction() {
   }
 #endif
   // update statistics
-  RecordInHistogram(ioptions_.statistics, NUM_FILES_IN_SINGLE_COMPACTION,
+  RecordInHistogram(ioptions_.stats, NUM_FILES_IN_SINGLE_COMPACTION,
                     c->inputs(0)->size());
 
   picker_->RegisterCompaction(c);
@@ -733,7 +733,7 @@ Compaction* UniversalCompactionBuilder::PickCompactionToReduceSortedRuns(
 }
 
 // Look at overall size amplification. If size amplification
-// exceeeds the configured value, then do a compaction
+// exceeds the configured value, then do a compaction
 // of the candidate files all the way upto the earliest
 // base file (overrides configured values of file-size ratios,
 // min_merge_width and max_merge_width).

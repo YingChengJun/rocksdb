@@ -18,12 +18,15 @@ namespace ROCKSDB_NAMESPACE {
 struct ColumnFamilyOptions;
 struct ConfigOptions;
 struct DBOptions;
+struct ImmutableCFOptions;
 struct ImmutableDBOptions;
 struct MutableDBOptions;
 struct MutableCFOptions;
 struct Options;
 
 std::vector<CompressionType> GetSupportedCompressions();
+
+std::vector<CompressionType> GetSupportedDictCompressions();
 
 // Checks that the combination of DBOptions and ColumnFamilyOptions are valid
 Status ValidateOptions(const DBOptions& db_opts,
@@ -35,6 +38,8 @@ DBOptions BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
 ColumnFamilyOptions BuildColumnFamilyOptions(
     const ColumnFamilyOptions& ioptions,
     const MutableCFOptions& mutable_cf_options);
+ColumnFamilyOptions BuildColumnFamilyOptions(const ImmutableCFOptions& ioptions,
+                                             const MutableCFOptions& moptions);
 
 #ifndef ROCKSDB_LITE
 std::unique_ptr<Configurable> DBOptionsAsConfigurable(
