@@ -328,6 +328,7 @@ bool MemTableList::IsFlushPending() const {
   if ((flush_requested_ && num_flush_not_started_ > 0) ||
       (num_flush_not_started_ >= min_write_buffer_number_to_merge_)) {
     assert(imm_flush_needed.load(std::memory_order_relaxed));
+    printf("Flush Pending True, Num Flush Not Started = %d\n", num_flush_not_started_);
     return true;
   }
   return false;
@@ -376,6 +377,16 @@ void MemTableList::GetMemtablesForInMemoryCompaction(autovector<MemTable*>* ret)
       break;
     }
   }
+}
+
+void MemTableList::RemoveMemTablesAfterInMemoryCompaction(autovector<MemTable*>* m,
+                                 autovector<MemTable*>* to_delete) {
+  auto& memlist_ = current_->memlist_;
+  for (auto it = m->begin(); it != m->end(); it++) {
+    memlist_.remove(*it);
+    current_->UnrefMemTable(to_delete, *it);
+  }
+  num_flush_not_started_ -= m->size();
 }
 
 void MemTableList::RollbackMemtableFlush(const autovector<MemTable*>& mems,

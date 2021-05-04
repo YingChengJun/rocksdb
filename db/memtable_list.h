@@ -256,6 +256,9 @@ class MemTableList {
 
   void GetMemtablesForInMemoryCompaction(autovector<MemTable*>* ret);
 
+  void RemoveMemTablesAfterInMemoryCompaction(autovector<MemTable*>* m,
+                                                            autovector<MemTable*>* to_delete);
+
   // Reset status of the given memtable list back to pending state so that
   // they can get picked up again on the next round of flush.
   void RollbackMemtableFlush(const autovector<MemTable*>& mems,

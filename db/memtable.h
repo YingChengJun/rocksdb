@@ -444,6 +444,14 @@ class MemTable {
     flush_in_progress_ = in_progress;
   }
 
+  bool inMemoryCompactioned() {
+    return in_memory_compactioned;
+  }
+
+  void setInMemoryCompactioned(bool flag) {
+    in_memory_compactioned = flag;
+  }
+
 #ifndef ROCKSDB_LITE
   void SetFlushJobInfo(std::unique_ptr<FlushJobInfo>&& info) {
     flush_job_info_ = std::move(info);
