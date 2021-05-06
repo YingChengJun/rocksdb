@@ -254,9 +254,9 @@ class MemTableList {
   void PickMemtablesToFlush(uint64_t max_memtable_id,
                             autovector<MemTable*>* mems);
 
-  void GetMemtablesForInMemoryCompaction(autovector<MemTable*>* ret);
+  void GetMemtablesForInMemoryCompaction(std::vector<MemTable*>* ret);
 
-  void RemoveMemTablesAfterInMemoryCompaction(autovector<MemTable*>* m,
+  void RemoveMemTablesAfterInMemoryCompaction(std::vector<MemTable*>* m,
                                                             autovector<MemTable*>* to_delete);
 
   // Reset status of the given memtable list back to pending state so that

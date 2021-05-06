@@ -1936,24 +1936,24 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   cfd->mem()->SetNextLogNumber(logfile_number_);
   cfd->imm()->Add(cfd->mem(), &context->memtables_to_free_);
 
-  // Note: 在添加新的Memtable后【调度一个线程】去取出该CF中所有的imm memtable
-  // 另外这里似乎需要锁，否则可能存在前一次写Schedule一次后台线程的过程中，后面一次写又Schedule一个后台线程
-  // 暂时没考虑Range Delete Table，之后的操作应该仅包含Read和Write
+  // Note: 在切换到新的Memtable后，取出该CF中所有没做过Compaction的Imm进行合并
+  // 另外，这里似乎需要锁，否则可能存在前一次写Schedule一次后台线程的过程中，后面一次写又Schedule一个后台线程
+  // 暂时没考虑Range Delete Table，测试时的操作应该仅包含Read和Write
   printf("================CFD_ID = %u================\n", cfd->GetID());
   if (!cfd->queued_for_flush() && !cfd->queued_for_compaction()) {
     // find all immutable memtables
-    autovector<MemTable*> imms;
+    std::vector<MemTable*> imms;
     cfd->imm()->GetMemtablesForInMemoryCompaction(&imms);
     printf("CFD->imm()->NumNotFlushed() = %d\n", cfd->imm()->NumNotFlushed());
     printf("ImmutableTables picked for in memory compaction = %lu\n", imms.size());
     if (imms.size() > 1) {
       // merge other imms to the oldest imm
-      auto it = imms.rbegin();
+      auto it = imms.begin();
       MemTable* merged = *it;
       ReadOptions ro;
       Arena arena;
       std::vector<InternalIterator*> mem_iters;
-      for (++it; it != imms.rend(); ++it) {
+      for (++it; it != imms.end(); ++it) {
         MemTable* m = *it;
         mem_iters.push_back(m->NewIterator(ro, &arena));
       }
@@ -1963,7 +1963,6 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
       iter->SeekToFirst();
       auto* parsed_key = new ParsedInternalKey();
       while (iter->Valid()) {
-        // 这里没有考虑到后续的一些细节, 比如更新num_entries、 bloom filter等
         Status parse_status = ParseInternalKey(iter->key(), parsed_key, false);
         if (parse_status == Status::OK()) {
           merged->Add(parsed_key->sequence, parsed_key->type,
@@ -1977,8 +1976,8 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
       }
       delete parsed_key;
       merged->setInMemoryCompactioned(true);
-      // remove other imms
-      imms.pop_back();
+      // remove all immutable tables except the latest
+      imms.erase(imms.begin());
       cfd->imm()->RemoveMemTablesAfterInMemoryCompaction(
           &imms, &context->memtables_to_free_);
       printf("Finish in memory compaction, now CFD->imm()->NumNotFlushed() = %d\n",
@@ -1991,7 +1990,6 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   } else {
     printf("This cf is queued for flush or compaction!\n");
   }
-
   new_mem->Ref();
   cfd->SetMemtable(new_mem);
   InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,

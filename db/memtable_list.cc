@@ -364,7 +364,7 @@ void MemTableList::PickMemtablesToFlush(uint64_t max_memtable_id,
   }
 }
 
-void MemTableList::GetMemtablesForInMemoryCompaction(autovector<MemTable*>* ret) {
+void MemTableList::GetMemtablesForInMemoryCompaction(std::vector<MemTable*>* ret) {
   assert(ret != nullptr);
   const auto& memlist = current_->memlist_;
   for (auto it = memlist.begin(); it != memlist.end(); ++it) {
@@ -379,7 +379,7 @@ void MemTableList::GetMemtablesForInMemoryCompaction(autovector<MemTable*>* ret)
   }
 }
 
-void MemTableList::RemoveMemTablesAfterInMemoryCompaction(autovector<MemTable*>* m,
+void MemTableList::RemoveMemTablesAfterInMemoryCompaction(std::vector<MemTable*>* m,
                                  autovector<MemTable*>* to_delete) {
   auto& memlist_ = current_->memlist_;
   for (auto it = m->begin(); it != m->end(); it++) {
