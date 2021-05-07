@@ -316,7 +316,7 @@ Status DBImpl::FlushMemTableToOutputFile(
 Status DBImpl::FlushMemTablesToOutputFiles(
     const autovector<BGFlushArg>& bg_flush_args, bool* made_progress,
     JobContext* job_context, LogBuffer* log_buffer, Env::Priority thread_pri) {
-  printf("Start flush memTables to output files!\n");
+  ROCKS_LOG_BUFFER(log_buffer, "Start flush memTables to output files!\n");
   if (immutable_db_options_.atomic_flush) {
     return AtomicFlushMemTablesToOutputFiles(
         bg_flush_args, made_progress, job_context, log_buffer, thread_pri);
@@ -336,7 +336,7 @@ Status DBImpl::FlushMemTablesToOutputFiles(
       cfd, mutable_cf_options, made_progress, job_context, superversion_context,
       snapshot_seqs, earliest_write_conflict_snapshot, snapshot_checker,
       log_buffer, thread_pri);
-  printf("Finish flush memTables to output files!\n");
+  ROCKS_LOG_BUFFER(log_buffer, "Finish flush memTables to output files!\n");
   return s;
 }
 

@@ -1939,21 +1939,26 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   // Note: 在切换到新的Memtable后，取出该CF中所有没做过Compaction的Imm进行合并
   // 另外，这里似乎需要锁，否则可能存在前一次写Schedule一次后台线程的过程中，后面一次写又Schedule一个后台线程
   // 暂时没考虑Range Delete Table，测试时的操作应该仅包含Read和Write
-  printf("================CFD_ID = %u================\n", cfd->GetID());
   if (!cfd->queued_for_flush() && !cfd->queued_for_compaction()) {
     // find all immutable memtables
-    std::vector<MemTable*> imms;
+    autovector<MemTable*> imms;
     cfd->imm()->GetMemtablesForInMemoryCompaction(&imms);
-    printf("CFD->imm()->NumNotFlushed() = %d\n", cfd->imm()->NumNotFlushed());
-    printf("ImmutableTables picked for in memory compaction = %lu\n", imms.size());
+    ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                   "CFD->imm()->NumNotFlushed() = %d\n",
+                   cfd->imm()->NumNotFlushed());
+    ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                   "ImmutableTables picked for in memory compaction = %lu\n",
+                   imms.size());
     if (imms.size() > 1) {
       // merge other imms to the oldest imm
       auto it = imms.begin();
-      MemTable* merged = *it;
+      MemTable* merged =
+          cfd->ConstructNewMemtable(mutable_cf_options, kMaxSequenceNumber);
+      merged->Ref();
       ReadOptions ro;
       Arena arena;
       std::vector<InternalIterator*> mem_iters;
-      for (++it; it != imms.end(); ++it) {
+      for (; it != imms.end(); ++it) {
         MemTable* m = *it;
         mem_iters.push_back(m->NewIterator(ro, &arena));
       }
@@ -1961,40 +1966,67 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
           NewMergingIterator(&cfd->internal_comparator(), &mem_iters[0],
                              static_cast<int>(mem_iters.size()), &arena);
       iter->SeekToFirst();
-      auto* parsed_key = new ParsedInternalKey();
+
+      std::vector<SequenceNumber> snapshots = snapshots_.GetAll();
+      MergeHelper merge(
+          env_, cfd->internal_comparator().user_comparator(),
+          cfd->ioptions()->merge_operator.get(), nullptr,
+          cfd->ioptions()->logger, true /* internal key corruption is not ok */,
+          snapshots.empty() ? 0 : snapshots.back(),
+          snapshot_checker_.get());
+      CompactionIterator c_iter(
+          iter, cfd->internal_comparator().user_comparator(), &merge,
+          kMaxSequenceNumber, &snapshots, kMaxSequenceNumber,
+          snapshot_checker_.get(), env_,
+          ShouldReportDetailedTime(env_, cfd->ioptions()->stats),
+          true /* internal key corruption is not ok */, nullptr,
+          nullptr, cfd->ioptions()->allow_data_in_errors,
+          /*compaction=*/nullptr,
+          /*compaction_filter=*/nullptr, /*shutting_down=*/nullptr,
+          /*preserve_deletes_seqnum=*/0, /*manual_compaction_paused=*/nullptr,
+          immutable_db_options_.info_log, nullptr);
+
+      c_iter.SeekToFirst();
+
       while (iter->Valid()) {
-        Status parse_status = ParseInternalKey(iter->key(), parsed_key, false);
+        ParsedInternalKey parsed_key;
+        Status parse_status = ParseInternalKey(iter->key(), &parsed_key, false);
         if (parse_status == Status::OK()) {
-          merged->Add(parsed_key->sequence, parsed_key->type,
-                      parsed_key->user_key, iter->value(), nullptr);
-          // printf("Merging... %s\n", parsed_key->DebugString(false,
-          // false).c_str());
+          assert(parsed_key.type == kTypeValue);
+          merged->Add(parsed_key.sequence, parsed_key.type, parsed_key.user_key,
+                      iter->value(), nullptr);
         } else {
-          printf("Parse internal key error!\n");
+          ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                         "Parse internal key error!\n");
         }
         iter->Next();
       }
-      delete parsed_key;
+
       merged->setInMemoryCompactioned(true);
-      // remove all immutable tables except the latest
-      imms.erase(imms.begin());
+      // remove all immutable tables except the latest & add merged memtable
       cfd->imm()->RemoveMemTablesAfterInMemoryCompaction(
           &imms, &context->memtables_to_free_);
-      printf("Finish in memory compaction, now CFD->imm()->NumNotFlushed() = %d\n",
-             cfd->imm()->NumNotFlushed());
-      // add merged memtable
+      cfd->imm()->Add(merged, &context->memtables_to_free_);
+      ROCKS_LOG_INFO(
+          immutable_db_options_.info_log,
+          "Finish in memory compaction, now CFD->imm()->NumNotFlushed() = %d\n",
+          cfd->imm()->NumNotFlushed());
     } else {
-      printf(
-          "ImmutableTables picked for in memory compaction < 2, Not need to do in memory compaction\n");
+      ROCKS_LOG_INFO(
+          immutable_db_options_.info_log,
+          "ImmutableTables picked for in memory compaction < 2, Not need to do "
+          "in memory compaction\n");
     }
   } else {
-    printf("This cf is queued for flush or compaction!\n");
+    ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                   "This cf is queued for flush or compaction!\n");
   }
   new_mem->Ref();
   cfd->SetMemtable(new_mem);
   InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,
                                      mutable_cf_options);
-  printf("=============================================\n");
+  ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                 "=============================================\n");
 #ifndef ROCKSDB_LITE
   mutex_.Unlock();
   // Notify client that memtable is sealed, now that we have successfully
