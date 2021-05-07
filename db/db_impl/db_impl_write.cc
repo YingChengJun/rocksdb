@@ -1939,6 +1939,7 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   // Note: 在切换到新的Memtable后，取出该CF中所有没做过Compaction的Imm进行合并
   // 另外，这里似乎需要锁，否则可能存在前一次写Schedule一次后台线程的过程中，后面一次写又Schedule一个后台线程
   // 暂时没考虑Range Delete Table，测试时的操作应该仅包含Read和Write
+  const int compaction_threshold = 2;
   if (!cfd->queued_for_flush() && !cfd->queued_for_compaction()) {
     // find all immutable memtables
     autovector<MemTable*> imms;
@@ -1949,7 +1950,7 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     ROCKS_LOG_INFO(immutable_db_options_.info_log,
                    "ImmutableTables picked for in memory compaction = %lu\n",
                    imms.size());
-    if (imms.size() > 1) {
+    if (imms.size() > compaction_threshold) {
       // merge other imms to the oldest imm
       auto it = imms.begin();
       MemTable* merged =
@@ -1967,20 +1968,21 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
                              static_cast<int>(mem_iters.size()), &arena);
       iter->SeekToFirst();
 
-      std::vector<SequenceNumber> snapshots = snapshots_.GetAll();
+      std::vector<SequenceNumber> sps = this->snapshots_.GetAll();
+      std::unique_ptr<CompactionRangeDelAggregator> range_del_agg(
+          new CompactionRangeDelAggregator(&cfd->internal_comparator(), sps));
       MergeHelper merge(
           env_, cfd->internal_comparator().user_comparator(),
           cfd->ioptions()->merge_operator.get(), nullptr,
           cfd->ioptions()->logger, true /* internal key corruption is not ok */,
-          snapshots.empty() ? 0 : snapshots.back(),
-          snapshot_checker_.get());
+          sps.empty() ? 0 : sps.back(), snapshot_checker_.get());
       CompactionIterator c_iter(
           iter, cfd->internal_comparator().user_comparator(), &merge,
-          kMaxSequenceNumber, &snapshots, kMaxSequenceNumber,
+          kMaxSequenceNumber, &sps, kMaxSequenceNumber,
           snapshot_checker_.get(), env_,
           ShouldReportDetailedTime(env_, cfd->ioptions()->stats),
-          true /* internal key corruption is not ok */, nullptr,
-          nullptr, cfd->ioptions()->allow_data_in_errors,
+          true /* internal key corruption is not ok */, range_del_agg.get(), nullptr,
+          cfd->ioptions()->allow_data_in_errors,
           /*compaction=*/nullptr,
           /*compaction_filter=*/nullptr, /*shutting_down=*/nullptr,
           /*preserve_deletes_seqnum=*/0, /*manual_compaction_paused=*/nullptr,
@@ -1988,18 +1990,11 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
 
       c_iter.SeekToFirst();
 
-      while (iter->Valid()) {
-        ParsedInternalKey parsed_key;
-        Status parse_status = ParseInternalKey(iter->key(), &parsed_key, false);
-        if (parse_status == Status::OK()) {
-          assert(parsed_key.type == kTypeValue);
-          merged->Add(parsed_key.sequence, parsed_key.type, parsed_key.user_key,
-                      iter->value(), nullptr);
-        } else {
-          ROCKS_LOG_INFO(immutable_db_options_.info_log,
-                         "Parse internal key error!\n");
-        }
-        iter->Next();
+      while (c_iter.Valid()) {
+        const ParsedInternalKey& ikey = c_iter.ikey();
+        merged->Add(ikey.sequence, ikey.type, c_iter.key(), c_iter.value(),
+                    nullptr);
+        c_iter.Next();
       }
 
       merged->setInMemoryCompactioned(true);
@@ -2014,8 +2009,8 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     } else {
       ROCKS_LOG_INFO(
           immutable_db_options_.info_log,
-          "ImmutableTables picked for in memory compaction < 2, Not need to do "
-          "in memory compaction\n");
+          "ImmutableTables picked for in memory compaction <= %d, Not need to do "
+          "in memory compaction\n", compaction_threshold);
     }
   } else {
     ROCKS_LOG_INFO(immutable_db_options_.info_log,
