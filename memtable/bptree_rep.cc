@@ -12,14 +12,10 @@ namespace {
 class BpTreeRep : public MemTableRep {
  private:
   size_t memory_usage = 0;
+
  public:
-//  explicit BpTreeRep(const KeyComparator& compare, Allocator* allocator);
-//
-//  KeyHandle Allocate(const size_t len, char** buf) override;
-//  void Insert(KeyHandle handle) override;
-//  bool Contains(const char* key) const override;
-//  void Get(const LookupKey& k, void* callback_args,
-//           bool (*callback_func)(void* arg, const char* entry)) override;
+  explicit BpTreeRep(const KeyComparator &compare, Allocator *allocator)
+      : MemTableRep(allocator){};
   KeyHandle Allocate(const size_t len, char **buf) override {
     return MemTableRep::Allocate(len, buf);
   }
@@ -30,7 +26,7 @@ class BpTreeRep : public MemTableRep {
     MemTableRep::Get(k, callback_args, callback_func);
   }
   size_t ApproximateMemoryUsage() override { return memory_usage; }
-  Iterator* GetIterator(Arena* arena) override { return nullptr; }
+  Iterator *GetIterator(Arena *arena) override { return nullptr; }
 };
 
 }  // namespace
