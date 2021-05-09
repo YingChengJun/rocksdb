@@ -1738,10 +1738,24 @@ void DBImpl::NotifyOnMemTableSealed(ColumnFamilyData* /*cfd*/,
 }
 #endif  // ROCKSDB_LITE
 
-void PrintUserKey(Slice& key) {
+/*
+void PrintUserKey(Slice& key, Logger* logger) {
   for (size_t i = 0; i < key.size_; i++) {
-    printf("%c", key.data_[i]);
+    ROCKS_LOG_INFO(logger, "\\%x", key.data_[i]);
   }
+}
+*/
+
+bool IsSameUserKey(Slice& k1, Slice &k2) {
+  if (LIKELY(k1.size_ == k2.size_)) {
+    for (size_t i = 0; i < k1.size_; i++) {
+      if (k1[i] != k2[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 // REQUIRES: mutex_ is held
@@ -1756,7 +1770,8 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   MemTable* new_mem = nullptr;
   IOStatus io_s;
 
-/*  {
+  /*
+  {
     MemTable* om = cfd->mem();
     printf("===================Start Print MemTable Info, TableId = %lu===================\n", om->GetID());
     ReadOptions ro = rocksdb::ReadOptions();
@@ -1767,13 +1782,14 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
       ParsedInternalKey pk;
       Status ps = ParseInternalKey(iter->key(), &pk, true);
       if (ps == Status::OK()) {
-        printf("KeySize = %zu, Key = \"", pk.user_key.size_);
-        PrintUserKey(pk.user_key);
-        printf("\", Seq = %lu, Type = %d, Val = \"%s\"\n", pk.sequence, pk.type, iter->value().data_);
+        ROCKS_LOG_INFO(immutable_db_options_.info_log,"KeySize = %zu, Key = \"", pk.user_key.size_);
+        PrintUserKey(pk.user_key, immutable_db_options_.info_log.get());
+        ROCKS_LOG_INFO(immutable_db_options_.info_log,"\", Seq = %lu, Type = %d, Val = \"%s\"\n", pk.sequence, pk.type, iter->value().data_);
       }
       iter->Next();
     }
-  }*/
+  }
+  */
 
   // Recoverable state is persisted in WAL. After memtable switch, WAL might
   // be deleted, so we write the state to memtable to be persisted as well.
@@ -2013,7 +2029,6 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   // Note: 在切换到新的Memtable后，取出该CF中所有没做过Compaction的Imm进行合并
   // 另外，这里似乎需要锁，否则可能存在前一次写Schedule一次后台线程的过程中，后面一次写又Schedule一个后台线程
   // 暂时没考虑Range Delete Table，测试时的操作应该仅包含Read和Write
-  /*
   const int compaction_threshold = 1;
   if (!cfd->queued_for_flush() && !cfd->queued_for_compaction()) {
     // find all immutable memtables
@@ -2087,7 +2102,7 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     ROCKS_LOG_INFO(immutable_db_options_.info_log,
                    "This cf is queued for flush or compaction!\n");
   }
-  */
+
   new_mem->Ref();
   cfd->SetMemtable(new_mem);
   InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,
