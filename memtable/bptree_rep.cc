@@ -12,7 +12,7 @@ namespace ROCKSDB_NAMESPACE {
 namespace {
 
 using namespace stl_wrappers;
-const size_t order = 6;
+const size_t order = 64;
 
 struct Node {
   char *key[order];
