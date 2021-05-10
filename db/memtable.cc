@@ -124,6 +124,67 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
   }
 }
 
+MemTable::MemTable(const InternalKeyComparator& cmp,
+                   const ImmutableCFOptions& ioptions,
+                   const MutableCFOptions& mutable_cf_options,
+                   WriteBufferManager* write_buffer_manager,
+                   SequenceNumber latest_seq, uint32_t column_family_id, bool dummy_with_bp_tree)
+    : comparator_(cmp),
+      moptions_(ioptions, mutable_cf_options),
+      refs_(0),
+      kArenaBlockSize(OptimizeBlockSize(moptions_.arena_block_size)),
+      mem_tracker_(write_buffer_manager),
+      arena_(moptions_.arena_block_size,
+             (write_buffer_manager != nullptr &&
+              (write_buffer_manager->enabled() ||
+               write_buffer_manager->cost_to_cache()))
+             ? &mem_tracker_
+             : nullptr,
+             mutable_cf_options.memtable_huge_page_size),
+      table_(NewBpTreeRepFactory()->CreateMemTableRep(
+          comparator_, &arena_, mutable_cf_options.prefix_extractor.get(),
+          ioptions.logger, column_family_id)),
+      range_del_table_(SkipListFactory().CreateMemTableRep(
+          comparator_, &arena_, nullptr /* transform */, ioptions.logger,
+          column_family_id)),
+      is_range_del_table_empty_(true),
+      data_size_(0),
+      num_entries_(0),
+      num_deletes_(0),
+      write_buffer_size_(mutable_cf_options.write_buffer_size),
+      flush_in_progress_(false),
+      flush_completed_(false),
+      file_number_(0),
+      first_seqno_(0),
+      earliest_seqno_(latest_seq),
+      creation_seq_(latest_seq),
+      mem_next_logfile_number_(0),
+      min_prep_log_referenced_(0),
+      locks_(moptions_.inplace_update_support
+             ? moptions_.inplace_update_num_locks
+             : 0),
+      prefix_extractor_(mutable_cf_options.prefix_extractor.get()),
+      flush_state_(FLUSH_NOT_REQUESTED),
+      clock_(ioptions.clock),
+      insert_with_hint_prefix_extractor_(
+          ioptions.memtable_insert_with_hint_prefix_extractor.get()),
+      oldest_key_time_(std::numeric_limits<uint64_t>::max()),
+      atomic_flush_seqno_(kMaxSequenceNumber),
+      approximate_memory_usage_(0) {
+  UpdateFlushState();
+  // something went wrong if we need to flush before inserting anything
+  assert(!ShouldScheduleFlush());
+
+  // use bloom_filter_ for both whole key and prefix bloom filter
+  if ((prefix_extractor_ || moptions_.memtable_whole_key_filtering) &&
+      moptions_.memtable_prefix_bloom_bits > 0) {
+    bloom_filter_.reset(
+        new DynamicBloom(&arena_, moptions_.memtable_prefix_bloom_bits,
+                         6 /* hard coded 6 probes */,
+                         moptions_.memtable_huge_page_size, ioptions.logger));
+  }
+}
+
 MemTable::~MemTable() {
   mem_tracker_.FreeMem();
   assert(refs_ == 0);

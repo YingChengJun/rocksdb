@@ -1,24 +1,41 @@
 //
 // Created by Chengjun Ying on 2021/5/6.
 //
-
-#include <vector>
+#include "rocksdb/memtablerep.h"
 
 #include "db/memtable.h"
 #include "memory/arena.h"
-#include "rocksdb/memtablerep.h"
+
 
 namespace ROCKSDB_NAMESPACE {
 namespace {
 
-const size_t order = 8;
+const size_t order = 3;
 
 struct Node {
-  std::vector<char *> key;
-  std::vector<Node *> ptr;
-  Node *prev = nullptr;
-  Node *next = nullptr;
-  bool IsLeafNode() const { return ptr.empty(); }
+  char* key[order];
+  Node* ptr[order];
+  Node* prev = nullptr;
+  Node* next = nullptr;
+  size_t key_size = 0;
+  size_t ptr_size = 0;
+  bool IsLeafNode() const { return ptr_size == 0; }
+  void InitNode() {
+    key_size = ptr_size = 0;
+    prev = next = nullptr;
+    for (size_t i = 0; i < order; i++) {
+      key[i] = nullptr;
+      ptr[i] = nullptr;
+    }
+  }
+  void push_key(char* pkey) {
+    assert(key_size < order);
+    key[key_size++] = pkey;
+  }
+  void push_ptr(Node* pNode) {
+    assert(ptr_size < order);
+    ptr[ptr_size++] = pNode;
+  }
 };
 
 class BpTreeRep : public MemTableRep {
@@ -33,10 +50,11 @@ class BpTreeRep : public MemTableRep {
   void MarkReadOnly() override;
   size_t ApproximateMemoryUsage() override { return memory_usage_; }
   MemTableRep::Iterator *GetIterator(Arena *arena) override;
+  ~BpTreeRep() override {}
 
   class Iterator : public MemTableRep::Iterator {
    public:
-    ~Iterator() override = default;
+    ~Iterator() override{};
     Iterator(BpTreeRep* bpTreeRep) {
       SetBpTree(bpTreeRep);
     }
@@ -47,28 +65,27 @@ class BpTreeRep : public MemTableRep {
     }
     void Next() override {
       assert(Valid());
-      if (cur_index == cur_node->key.size() - 1) {
+      if (cur_index == cur_node->key_size - 1) {
         cur_node = cur_node->next;
         cur_index = 0;
       } else {
         cur_index++;
       }
-      assert(cur_index < cur_node->key.size());
+      assert(cur_node == nullptr || cur_index < cur_node->key_size);
     }
     void Prev() override {
       assert(Valid());
       if (cur_index == 0) {
         cur_node = cur_node->prev;
-        cur_index = cur_node->key.size() - 1;
+        cur_index = cur_node->key_size - 1;
       } else {
         cur_index--;
       }
-      assert(cur_index >= 0);
     }
     void Seek(const Slice &internal_key, const char *memtable_key) override {
       const char *encoded_key = (memtable_key != nullptr)
-                                    ? memtable_key
-                                    : EncodeKey(&tmp_, internal_key);
+                                ? memtable_key
+                                : EncodeKey(&tmp_, internal_key);
       bpTree_->FindGreaterOrEqual(cur_node, cur_index, bpTree_->root_,
                                   encoded_key);
     }
@@ -82,7 +99,7 @@ class BpTreeRep : public MemTableRep {
     }
     void SeekToLast() override {
       cur_node = bpTree_->leaf_tail_;
-      cur_index = bpTree_->leaf_tail_->key.size() - 1;
+      cur_index = bpTree_->leaf_tail_->key_size - 1;
     }
     void SetBpTree(BpTreeRep *bpTreeRep) {
       assert(bpTreeRep != nullptr);
@@ -161,8 +178,9 @@ void rocksdb::BpTreeRep::ConstructLeafNode() {
     size_t rep = 0;
     Node *node =
         reinterpret_cast<Node *>(allocator_->AllocateAligned(sizeof(Node)));
+    node->InitNode();
     for (; rep < order && iter != keys_.end(); rep++, iter++) {
-      node->key.push_back(*iter);
+      node->push_key(*iter);
     }
     if (leaf_head_ == nullptr) {
       leaf_head_ = leaf_tail_ = node;
@@ -187,9 +205,10 @@ void rocksdb::BpTreeRep::ConstructBpTree(Node *start, Node *end) {
     size_t rep = 0;
     Node *node =
         reinterpret_cast<Node *>(allocator_->AllocateAligned(sizeof(Node)));
+    node->InitNode();
     for (; rep < order && p != nullptr; rep++, p = p->next) {
-      node->key.push_back(p->key[0]);
-      node->ptr.push_back(p);
+      node->push_key(p->key[0]);
+      node->push_ptr(p);
     }
     if (head == nullptr) {
       head = tail = node;
@@ -206,8 +225,8 @@ Status rocksdb::BpTreeRep::Find(Node *cur, const char *key) const {
   if (compare_(key, cur->key[0]) < 0) {
     return Status::NotFound();
   }
-  for (size_t i = 0; i < cur->key.size(); i++) {
-    if (i == cur->key.size() - 1) {
+  for (size_t i = 0; i < cur->key_size; i++) {
+    if (i == cur->key_size - 1) {
       if (cur->IsLeafNode()) {
         // leaf node
         if (compare_(key, cur->key[i]) == 0) {
@@ -242,7 +261,7 @@ void rocksdb::BpTreeRep::FindGreaterOrEqual(Node *&ret, size_t &index,
   // leaf node
   if (cur->IsLeafNode()) {
     while (cur != nullptr) {
-      for (size_t i = 0; i < cur->key.size(); i++) {
+      for (size_t i = 0; i < cur->key_size; i++) {
         if (compare_(cur->key[i], key) >= 0) {
           ret = cur;
           index = i;
@@ -256,8 +275,8 @@ void rocksdb::BpTreeRep::FindGreaterOrEqual(Node *&ret, size_t &index,
     return;
   }
   // none leaf node
-  for (size_t i = 0; i < cur->key.size(); i++) {
-    if (i == cur->key.size() - 1 && compare_(key, cur->key[i]) >= 0) {
+  for (size_t i = 0; i < cur->key_size; i++) {
+    if (i == cur->key_size - 1 && compare_(key, cur->key[i]) >= 0) {
       FindGreaterOrEqual(ret, index, cur->ptr[i], key);
       return;
     }
@@ -271,4 +290,15 @@ void rocksdb::BpTreeRep::FindGreaterOrEqual(Node *&ret, size_t &index,
 }
 
 }  // namespace
+
+MemTableRep* BpTreeRepFactory::CreateMemTableRep(
+    const MemTableRep::KeyComparator& compare, Allocator* allocator,
+    const SliceTransform*, Logger* /*logger*/) {
+  return new BpTreeRep(compare, allocator);
+}
+
+MemTableRepFactory* NewBpTreeRepFactory() {
+  return new BpTreeRepFactory;
+}
+
 }  // namespace ROCKSDB_NAMESPACE

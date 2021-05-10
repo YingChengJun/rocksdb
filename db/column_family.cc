@@ -1057,6 +1057,12 @@ MemTable* ColumnFamilyData::ConstructNewMemtable(
                       write_buffer_manager_, earliest_seq, id_);
 }
 
+MemTable* ColumnFamilyData::ConstructNewMemtableWithBpTree(
+    const MutableCFOptions& mutable_cf_options, SequenceNumber earliest_seq) {
+  return new MemTable(internal_comparator_, ioptions_, mutable_cf_options,
+                      write_buffer_manager_, earliest_seq, id_, true);
+}
+
 void ColumnFamilyData::CreateNewMemtable(
     const MutableCFOptions& mutable_cf_options, SequenceNumber earliest_seq) {
   if (mem_ != nullptr) {

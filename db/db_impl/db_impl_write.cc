@@ -16,6 +16,7 @@
 #include "table/merging_iterator.h"
 #include "test_util/sync_point.h"
 #include "util/cast_util.h"
+//#include "memtable/bptree_rep.cc"
 
 namespace ROCKSDB_NAMESPACE {
 // Convenience methods
@@ -1938,6 +1939,50 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   new_mem->Ref();
   cfd->SetMemtable(new_mem);
 
+
+  // Testing
+  /*
+  Arena arena;
+  MemTable::KeyComparator comparator_(cfd->internal_comparator());
+  BpTreeRep bpTreeRep(comparator_, &arena);
+
+  bpTreeRep.Insert((KeyHandle) "a");
+  bpTreeRep.Insert((KeyHandle) "b");
+  bpTreeRep.Insert((KeyHandle) "c");
+  bpTreeRep.Insert((KeyHandle) "d");
+  bpTreeRep.Insert((KeyHandle) "e");
+  bpTreeRep.Insert((KeyHandle) "f");
+  bpTreeRep.Insert((KeyHandle) "h");
+  bpTreeRep.Insert((KeyHandle) "i");
+  bpTreeRep.Insert((KeyHandle) "j");
+  bpTreeRep.Insert((KeyHandle) "k");
+  bpTreeRep.Insert((KeyHandle) "l");
+  bpTreeRep.Insert((KeyHandle) "m");
+  bpTreeRep.Insert((KeyHandle) "n");
+  bpTreeRep.Bulkload();
+
+
+  MemTableRep::Iterator* iter = bpTreeRep.GetIterator(&arena);
+  Slice dummy;
+  iter->Seek(dummy, "g");
+  if (iter->Valid()) {
+    const char* key = iter->key();
+    ROCKS_LOG_INFO(immutable_db_options_.info_log, "---------------%s", key);
+  }
+  ROCKS_LOG_INFO(immutable_db_options_.info_log, "---------------Finish");
+  */
+
+  /*
+  MemTableRep::Iterator* iter = bpTreeRep.GetIterator(&arena);
+  iter->SeekToFirst();
+  while (iter->Valid()) {
+    const char* key = iter->key();
+    ROCKS_LOG_INFO(immutable_db_options_.info_log, "---------------%s", key);
+    iter->Next();
+  }
+  ROCKS_LOG_INFO(immutable_db_options_.info_log, "---------------Finish");
+  */
+
   // Do In Memory Compaction
   if (env_->GetBackgroundThreads(Env::Priority::HIGH) > 0) {
     InMemoryCompactionArg *icarg = new InMemoryCompactionArg;
@@ -2008,9 +2053,7 @@ void DBImpl::ScheduleInMemoryCompaction(void* arg) {
 
       // merge other imms to the oldest imm
       auto it = imms.begin();
-      MemTable* merged =
-          cfd->ConstructNewMemtable(mutable_cf_options, kMaxSequenceNumber);
-      merged->Ref();
+
       ReadOptions ro;
       Arena arena;
       std::vector<InternalIterator*> mem_iters;
@@ -2032,6 +2075,13 @@ void DBImpl::ScheduleInMemoryCompaction(void* arg) {
         }
         iter->SeekToFirst();
       }
+
+      MemTable* merged =
+          cfd->ConstructNewMemtableWithBpTree(mutable_cf_options, kMaxSequenceNumber);
+      merged->Ref();
+
+      MemTable::KeyComparator comparator_(cfd->internal_comparator());
+      std::unique_ptr<MemTableRep>& tbl = merged->getMemTable();
 
       /*
       Slice prev;
@@ -2085,6 +2135,8 @@ void DBImpl::ScheduleInMemoryCompaction(void* arg) {
         merged->Add(kv.sequence, kv.type, kv.user_key, kv.value, nullptr);
         ikeys.pop();
       }
+
+      tbl->Bulkload();
 
       // remove all immutable tables except the latest & add merged memtable
       merged->setInMemoryCompactioned(true);

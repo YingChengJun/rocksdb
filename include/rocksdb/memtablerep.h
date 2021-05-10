@@ -352,6 +352,19 @@ class VectorRepFactory : public MemTableRepFactory {
   virtual const char* Name() const override { return "VectorRepFactory"; }
 };
 
+class BpTreeRepFactory : public MemTableRepFactory {
+ public:
+  explicit BpTreeRepFactory() {}
+
+  using MemTableRepFactory::CreateMemTableRep;
+  virtual MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator&,
+                                         Allocator*, const SliceTransform*,
+                                         Logger* logger) override;
+
+  virtual const char* Name() const override { return "BpTreeRepFactory"; }
+
+};
+
 // This class contains a fixed array of buckets, each
 // pointing to a skiplist (null if the bucket is empty).
 // bucket_count: number of fixed array buckets
@@ -383,6 +396,8 @@ extern MemTableRepFactory* NewHashLinkListRepFactory(
     int bucket_entries_logging_threshold = 4096,
     bool if_log_bucket_dist_when_flash = true,
     uint32_t threshold_use_skiplist = 256);
+
+extern MemTableRepFactory* NewBpTreeRepFactory();
 
 #endif  // ROCKSDB_LITE
 }  // namespace ROCKSDB_NAMESPACE

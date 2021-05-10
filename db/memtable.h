@@ -107,6 +107,11 @@ class MemTable {
                     const MutableCFOptions& mutable_cf_options,
                     WriteBufferManager* write_buffer_manager,
                     SequenceNumber earliest_seq, uint32_t column_family_id);
+  explicit MemTable(const InternalKeyComparator& comparator,
+                    const ImmutableCFOptions& ioptions,
+                    const MutableCFOptions& mutable_cf_options,
+                    WriteBufferManager* write_buffer_manager,
+                    SequenceNumber earliest_seq, uint32_t column_family_id, bool dummy_with_bp_tree);
   // No copying allowed
   MemTable(const MemTable&) = delete;
   MemTable& operator=(const MemTable&) = delete;
@@ -450,6 +455,14 @@ class MemTable {
 
   void setInMemoryCompactioned(bool flag) {
     in_memory_compactioned = flag;
+  }
+
+  std::unique_ptr<MemTableRep>& getMemTable() {
+    return table_;
+  }
+
+  ConcurrentArena* getArena() {
+    return &arena_;
   }
 
 #ifndef ROCKSDB_LITE
