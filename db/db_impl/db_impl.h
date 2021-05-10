@@ -80,6 +80,7 @@ class WriteCallback;
 struct JobContext;
 struct ExternalSstFileInfo;
 struct MemTableInfo;
+class Mutex;
 
 // Class to maintain directories for all database paths other than main one.
 class Directories {
@@ -1482,6 +1483,13 @@ class DBImpl : public DB {
     Env::Priority compaction_pri_;
   };
 
+  // In Memory Compaction Arg
+  struct InMemoryCompactionArg {
+    DBImpl* db_;
+    ColumnFamilyData* cfd;
+    WriteContext* context;
+  };
+
   // Initialize the built-in column family for persistent stats. Depending on
   // whether on-disk persistent stats have been enabled before, it may either
   // create a new column family and column family handle or just a column family
@@ -1757,6 +1765,11 @@ class DBImpl : public DB {
   static void BGWorkPurge(void* arg);
   static void UnscheduleCompactionCallback(void* arg);
   static void UnscheduleFlushCallback(void* arg);
+
+  // Note: For In Memory Compaction
+  static void ScheduleInMemoryCompaction(void* arg);
+  static void UnscheduleInMemoryCompactionCallback(void* arg);
+
   void BackgroundCallCompaction(PrepickedCompaction* prepicked_compaction,
                                 Env::Priority thread_pri);
   void BackgroundCallFlush(Env::Priority thread_pri);

@@ -80,6 +80,9 @@ class MemTableRep {
 
   explicit MemTableRep(Allocator* allocator) : allocator_(allocator) {}
 
+  // Note: Only used in bulk load bp tree
+  virtual void Bulkload() {};
+
   // Allocate a buf of len size for storing key. The idea is that a
   // specific memtable representation knows its underlying data structure
   // better. By allowing it to allocate memory, it can possibly put

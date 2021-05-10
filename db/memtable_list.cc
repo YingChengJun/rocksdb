@@ -383,7 +383,7 @@ void MemTableList::RemoveMemTablesAfterInMemoryCompaction(autovector<MemTable*>*
                                  autovector<MemTable*>* to_delete) {
   auto& memlist_ = current_->memlist_;
   for (auto it = m->begin(); it != m->end(); it++) {
-    memlist_.remove(*it);
+    current_->memlist_.remove(*it);
     current_->UnrefMemTable(to_delete, *it);
   }
   num_flush_not_started_ -= m->size();

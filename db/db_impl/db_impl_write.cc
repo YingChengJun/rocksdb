@@ -1738,26 +1738,6 @@ void DBImpl::NotifyOnMemTableSealed(ColumnFamilyData* /*cfd*/,
 }
 #endif  // ROCKSDB_LITE
 
-/*
-void PrintUserKey(Slice& key, Logger* logger) {
-  for (size_t i = 0; i < key.size_; i++) {
-    ROCKS_LOG_INFO(logger, "\\%x", key.data_[i]);
-  }
-}
-*/
-
-bool IsSameUserKey(Slice& k1, Slice &k2) {
-  if (LIKELY(k1.size_ == k2.size_)) {
-    for (size_t i = 0; i < k1.size_; i++) {
-      if (k1[i] != k2[i]) {
-        return false;
-      }
-    }
-    return true;
-  }
-  return false;
-}
-
 // REQUIRES: mutex_ is held
 // REQUIRES: this thread is currently at the front of the writer queue
 // REQUIRES: this thread is currently at the front of the 2nd writer queue if
@@ -1769,27 +1749,6 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   log::Writer* new_log = nullptr;
   MemTable* new_mem = nullptr;
   IOStatus io_s;
-
-  /*
-  {
-    MemTable* om = cfd->mem();
-    printf("===================Start Print MemTable Info, TableId = %lu===================\n", om->GetID());
-    ReadOptions ro = rocksdb::ReadOptions();
-    Arena arena;
-    InternalIterator* iter = om->NewIterator(ro, &arena);
-    iter->SeekToFirst();
-    while (iter->Valid()) {
-      ParsedInternalKey pk;
-      Status ps = ParseInternalKey(iter->key(), &pk, true);
-      if (ps == Status::OK()) {
-        ROCKS_LOG_INFO(immutable_db_options_.info_log,"KeySize = %zu, Key = \"", pk.user_key.size_);
-        PrintUserKey(pk.user_key, immutable_db_options_.info_log.get());
-        ROCKS_LOG_INFO(immutable_db_options_.info_log,"\", Seq = %lu, Type = %d, Val = \"%s\"\n", pk.sequence, pk.type, iter->value().data_);
-      }
-      iter->Next();
-    }
-  }
-  */
 
   // Recoverable state is persisted in WAL. After memtable switch, WAL might
   // be deleted, so we write the state to memtable to be persisted as well.
@@ -1976,71 +1935,77 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
 
   cfd->mem()->SetNextLogNumber(logfile_number_);
   cfd->imm()->Add(cfd->mem(), &context->memtables_to_free_);
+  new_mem->Ref();
+  cfd->SetMemtable(new_mem);
 
-  /*
-   *
-   * 测试代码一: 测试Merging Iterator和Compaction Iterator是否能够正常运行
-  MemTable* m1 = cfd->ConstructNewMemtable(mutable_cf_options, kMaxSequenceNumber);
-  MemTable* m2 = cfd->ConstructNewMemtable(mutable_cf_options, kMaxSequenceNumber);
-  m1->Ref(); m2->Ref();
-  m1->Add(1, kTypeValue, Slice("key_1"), Slice("val_1"), nullptr);
-  m1->Add(4, kTypeValue, Slice("key_2"), Slice("val_2"), nullptr);
-  m1->Add(5, kTypeValue, Slice("key_1"), Slice("val_3"), nullptr);
-  m1->Add(8,  kTypeValue, Slice("key_3"), Slice("val_2"), nullptr);
-  m2->Add(2, kTypeValue, Slice("key_1"), Slice("val_2"), nullptr);
-  m2->Add(3, kTypeValue, Slice("key_2"), Slice("val_1"), nullptr);
-  m2->Add(6, kTypeValue, Slice("key_3"), Slice("val_1"), nullptr);
-  m2->Add(7,  kTypeValue, Slice("key_2"), Slice("val_3"), nullptr);
-  ReadOptions ro = rocksdb::ReadOptions();
-  Arena arena;
-  InternalIterator* i1 = m1->NewIterator(ro, &arena);
-  InternalIterator* i2 = m2->NewIterator(ro, &arena);
-  i1->SeekToFirst();
-  i2->SeekToFirst();
-  std::vector<InternalIterator*> mem_iters;
-  mem_iters.push_back(i1);
-  mem_iters.push_back(i2);
-  InternalIterator* iter =
-      NewMergingIterator(&cfd->internal_comparator(), &mem_iters[0],
-                         static_cast<int>(mem_iters.size()), &arena);
-  std::vector<SequenceNumber> sps;
-  std::unique_ptr<CompactionRangeDelAggregator> range_del_agg(
-      new CompactionRangeDelAggregator(&cfd->internal_comparator(), sps));
-  MergeHelper merge(env_, cfd->internal_comparator().user_comparator(),
-                    cfd->ioptions()->merge_operator.get(), nullptr,
-                    cfd->ioptions()->logger, true,
-                    sps.empty() ? 0 : sps.back(), snapshot_checker_.get());
-  CompactionIterator c_iter(
-      iter, cfd->internal_comparator().user_comparator(), &merge,
-      kMaxSequenceNumber, &sps, kMaxSequenceNumber, snapshot_checker_.get(),
-      env_, ShouldReportDetailedTime(env_, cfd->ioptions()->stats), true,
-      range_del_agg.get(), nullptr, cfd->ioptions()->allow_data_in_errors,
-      nullptr, nullptr, nullptr, 0, nullptr, immutable_db_options_.info_log,
-      nullptr);
-  c_iter.SeekToFirst();
-  while (c_iter.Valid()) {
-    ParsedInternalKey& pk = c_iter.ikey();
-    printf("Key = %s, Seq = %lu, Type = %d\n", pk.user_key.data_, pk.sequence, pk.type);
-    c_iter.Next();
+  // Do In Memory Compaction
+  if (env_->GetBackgroundThreads(Env::Priority::HIGH) > 0) {
+    InMemoryCompactionArg *icarg = new InMemoryCompactionArg;
+    icarg->cfd = cfd;
+    icarg->context = context;
+    icarg->db_ = this;
+    env_->Schedule(&DBImpl::ScheduleInMemoryCompaction, icarg, Env::Priority::HIGH, this,
+                   &DBImpl::UnscheduleInMemoryCompactionCallback);
   }
-  printf("===================================\n");
-*/
 
-  // Note: 在切换到新的Memtable后，取出该CF中所有没做过Compaction的Imm进行合并
-  // 另外，这里似乎需要锁，否则可能存在前一次写Schedule一次后台线程的过程中，后面一次写又Schedule一个后台线程
-  // 暂时没考虑Range Delete Table，测试时的操作应该仅包含Read和Write
+  InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,
+                                     mutable_cf_options);
+
+#ifndef ROCKSDB_LITE
+  mutex_.Unlock();
+  // Notify client that memtable is sealed, now that we have successfully
+  // installed a new memtable
+  NotifyOnMemTableSealed(cfd, memtable_info);
+  mutex_.Lock();
+#endif  // ROCKSDB_LITE
+  // It is possible that we got here without checking the value of i_os, but
+  // that is okay.  If we did, it most likely means that s was already an error.
+  // In any case, ignore any unchecked error for i_os here.
+  io_s.PermitUncheckedError();
+  return s;
+}
+
+bool IsSameUserKey(Slice *k1, Slice *k2) {
+  if (LIKELY(k1->size_ == k2->size_)) {
+    for (size_t i = 0; i < k1->size_; i++) {
+      if (k1->data_[i] != k2->data_[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+// Note: 在切换到新的Memtable后，取出该CF中所有没做过Compaction的Imm进行合并
+// 暂时没考虑Range Delete Table，测试时的操作应该仅包含Read和Write
+void DBImpl::ScheduleInMemoryCompaction(void* arg) {
   const int compaction_threshold = 1;
+  InMemoryCompactionArg ca = *(reinterpret_cast<InMemoryCompactionArg*>(arg));
+  ColumnFamilyData* cfd = ca.cfd;
+  WriteContext* context = ca.context;
+  DBImpl* db = ca.db_;
+
+  db->mutex_.Lock();
+
+  const MutableCFOptions mutable_cf_options = *cfd->GetLatestMutableCFOptions();
   if (!cfd->queued_for_flush() && !cfd->queued_for_compaction()) {
+    size_t total_key_before_compaction = 0;
+    size_t total_key_after_compaction = 0;
+
     // find all immutable memtables
     autovector<MemTable*> imms;
     cfd->imm()->GetMemtablesForInMemoryCompaction(&imms);
-    ROCKS_LOG_INFO(immutable_db_options_.info_log,
-                   "CFD->imm()->NumNotFlushed() = %d\n",
-                   cfd->imm()->NumNotFlushed());
-    ROCKS_LOG_INFO(immutable_db_options_.info_log,
-                   "ImmutableTables picked for in memory compaction = %lu\n",
-                   imms.size());
+    ROCKS_LOG_INFO(db->immutable_db_options_.info_log,
+                   "CFD->imm()->NumNotFlushed() = %d, ImmutableTables picked "
+                   "for in memory compaction = %lu\n",
+                   cfd->imm()->NumNotFlushed(), imms.size());
     if (imms.size() > compaction_threshold) {
+      ROCKS_LOG_INFO(db->immutable_db_options_.info_log,
+                     "++++++++++ Start Do In Memory Compaction!");
+      // record start time
+      clock_t start = clock();
+
       // merge other imms to the oldest imm
       auto it = imms.begin();
       MemTable* merged =
@@ -2056,71 +2021,105 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
       InternalIterator* iter =
           NewMergingIterator(&cfd->internal_comparator(), &mem_iters[0],
                              static_cast<int>(mem_iters.size()), &arena);
-      iter->SeekToFirst();
+      std::priority_queue<ParsedInternalKeyValue, std::vector<ParsedInternalKeyValue>, ParsedInternalKeySeqComparator> ikeys;
 
-      std::vector<SequenceNumber> sps = this->snapshots_.GetAll();
+      iter->SeekToFirst();
+      {
+        // Only For Performance Analysis
+        while (iter->Valid()) {
+          total_key_before_compaction++;
+          iter->Next();
+        }
+        iter->SeekToFirst();
+      }
+
+      /*
+      Slice prev;
+      while (iter->Valid()) {
+        // Only For Performance Analysis
+        {
+          total_key_before_compaction++;
+        }
+        ParsedInternalKey pk;
+        if (ParseInternalKey(iter->key(), &pk, true) == Status::OK()) {
+          if (!IsSameUserKey(&pk.user_key, &prev)) {
+            ikeys.push(ParsedInternalKeyValue(pk.user_key, pk.sequence, pk.type, iter->value()));
+          }
+        }
+        prev.data_ = pk.user_key.data_;
+        prev.size_ = pk.user_key.size();
+        iter->Next();
+      }
+      */
+
+      std::vector<SequenceNumber> sps = db->snapshots_.GetAll();
       std::unique_ptr<CompactionRangeDelAggregator> range_del_agg(
           new CompactionRangeDelAggregator(&cfd->internal_comparator(), sps));
-      MergeHelper merge(env_, cfd->internal_comparator().user_comparator(),
+      MergeHelper merge(db->env_, cfd->internal_comparator().user_comparator(),
                         cfd->ioptions()->merge_operator.get(), nullptr,
                         cfd->ioptions()->logger, true,
-                        sps.empty() ? 0 : sps.back(), snapshot_checker_.get());
+                        sps.empty() ? 0 : sps.back(), db->snapshot_checker_.get());
       CompactionIterator c_iter(
           iter, cfd->internal_comparator().user_comparator(), &merge,
-          kMaxSequenceNumber, &sps, kMaxSequenceNumber, snapshot_checker_.get(),
-          env_, ShouldReportDetailedTime(env_, cfd->ioptions()->stats), true,
+          kMaxSequenceNumber, &sps, kMaxSequenceNumber, db->snapshot_checker_.get(),
+          db->env_, ShouldReportDetailedTime(db->env_, cfd->ioptions()->stats), true,
           range_del_agg.get(), nullptr, cfd->ioptions()->allow_data_in_errors,
-          nullptr, nullptr, nullptr, 0, nullptr, immutable_db_options_.info_log,
+          nullptr, nullptr, nullptr, 0, nullptr, db->immutable_db_options_.info_log,
           nullptr);
 
       c_iter.SeekToFirst();
-
       while (c_iter.Valid()) {
-        const ParsedInternalKey& ikey = c_iter.ikey();
-        merged->Add(ikey.sequence, ikey.type, ikey.user_key, c_iter.value(),
-                    nullptr);
+        {
+          // Only For Performance Analysis
+          total_key_after_compaction++;
+        }
+        const ParsedInternalKey &ikey = c_iter.ikey();
+        ikeys.push(ParsedInternalKeyValue(ikey.user_key, ikey.sequence, ikey.type, c_iter.value()));
         c_iter.Next();
       }
 
-      merged->setInMemoryCompactioned(true);
+      total_key_after_compaction = ikeys.size();
+
+      while (!ikeys.empty()) {
+        ParsedInternalKeyValue kv = ikeys.top();
+        merged->Add(kv.sequence, kv.type, kv.user_key, kv.value, nullptr);
+        ikeys.pop();
+      }
+
       // remove all immutable tables except the latest & add merged memtable
-      cfd->imm()->RemoveMemTablesAfterInMemoryCompaction(
-          &imms, &context->memtables_to_free_);
+      merged->setInMemoryCompactioned(true);
+      cfd->imm()->RemoveMemTablesAfterInMemoryCompaction(&imms, &context->memtables_to_free_);
       cfd->imm()->Add(merged, &context->memtables_to_free_);
+
+      // record finish time
+      clock_t finish = clock();
       ROCKS_LOG_INFO(
-          immutable_db_options_.info_log,
-          "Finish in memory compaction, now CFD->imm()->NumNotFlushed() = %d\n",
-          cfd->imm()->NumNotFlushed());
+          db->immutable_db_options_.info_log,
+          "==========++++++++++ total_key_before_compaction = %zu, "
+          "total_key_after_compaction = %zu, total time cost = %ld\n",
+          total_key_before_compaction, total_key_after_compaction,
+          finish - start);
+      ROCKS_LOG_INFO(db->immutable_db_options_.info_log,
+                     "++++++++++ Finish in memory compaction, now "
+                     "CFD->imm()->NumNotFlushed() = %d\n",
+                     cfd->imm()->NumNotFlushed());
     } else {
-      ROCKS_LOG_INFO(immutable_db_options_.info_log,
+      ROCKS_LOG_INFO(db->immutable_db_options_.info_log,
                      "ImmutableTables picked for in memory compaction <= %d, "
                      "Not need to do "
                      "in memory compaction\n",
                      compaction_threshold);
     }
   } else {
-    ROCKS_LOG_INFO(immutable_db_options_.info_log,
+    ROCKS_LOG_INFO(db->immutable_db_options_.info_log,
                    "This cf is queued for flush or compaction!\n");
   }
 
-  new_mem->Ref();
-  cfd->SetMemtable(new_mem);
-  InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,
-                                     mutable_cf_options);
-  ROCKS_LOG_INFO(immutable_db_options_.info_log,
-                 "=============================================\n");
-#ifndef ROCKSDB_LITE
-  mutex_.Unlock();
-  // Notify client that memtable is sealed, now that we have successfully
-  // installed a new memtable
-  NotifyOnMemTableSealed(cfd, memtable_info);
-  mutex_.Lock();
-#endif  // ROCKSDB_LITE
-  // It is possible that we got here without checking the value of i_os, but
-  // that is okay.  If we did, it most likely means that s was already an error.
-  // In any case, ignore any unchecked error for i_os here.
-  io_s.PermitUncheckedError();
-  return s;
+  db->mutex_.Unlock();
+}
+
+void DBImpl::UnscheduleInMemoryCompactionCallback(void* arg) {
+  delete reinterpret_cast<InMemoryCompactionArg*>(arg);
 }
 
 size_t DBImpl::GetWalPreallocateBlockSize(uint64_t write_buffer_size) const {

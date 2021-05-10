@@ -127,6 +127,13 @@ struct ParsedInternalKey {
   }
 };
 
+struct ParsedInternalKeyValue: ParsedInternalKey {
+  Slice value;
+  ParsedInternalKeyValue() = delete;
+  ParsedInternalKeyValue(const Slice& k, const SequenceNumber& seq, ValueType t, const Slice v)
+    : ParsedInternalKey(k, seq, t), value(v) {}
+};
+
 // Return the length of the encoding of "key".
 inline size_t InternalKeyEncodingLength(const ParsedInternalKey& key) {
   return key.user_key.size() + kNumInternalBytes;
@@ -784,6 +791,13 @@ struct ParsedInternalKeyComparator {
   }
 
   const InternalKeyComparator* cmp;
+};
+
+struct ParsedInternalKeySeqComparator {
+    bool operator()(const ParsedInternalKey& a,
+                    const ParsedInternalKey& b) const {
+        return a.sequence > b.sequence;
+    }
 };
 
 }  // namespace ROCKSDB_NAMESPACE
