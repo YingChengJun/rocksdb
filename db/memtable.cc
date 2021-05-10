@@ -128,7 +128,7 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
                    const ImmutableCFOptions& ioptions,
                    const MutableCFOptions& mutable_cf_options,
                    WriteBufferManager* write_buffer_manager,
-                   SequenceNumber latest_seq, uint32_t column_family_id, bool dummy_with_bp_tree)
+                   SequenceNumber latest_seq, uint32_t column_family_id, MemTableRepFactory* factory)
     : comparator_(cmp),
       moptions_(ioptions, mutable_cf_options),
       refs_(0),
@@ -141,7 +141,7 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
              ? &mem_tracker_
              : nullptr,
              mutable_cf_options.memtable_huge_page_size),
-      table_(NewBpTreeRepFactory()->CreateMemTableRep(
+      table_(factory->CreateMemTableRep(
           comparator_, &arena_, mutable_cf_options.prefix_extractor.get(),
           ioptions.logger, column_family_id)),
       range_del_table_(SkipListFactory().CreateMemTableRep(

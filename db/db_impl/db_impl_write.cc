@@ -1984,14 +1984,19 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   */
 
   // Do In Memory Compaction
-  if (env_->GetBackgroundThreads(Env::Priority::HIGH) > 0) {
-    InMemoryCompactionArg *icarg = new InMemoryCompactionArg;
-    icarg->cfd = cfd;
-    icarg->context = context;
-    icarg->db_ = this;
-    env_->Schedule(&DBImpl::ScheduleInMemoryCompaction, icarg, Env::Priority::HIGH, this,
-                   &DBImpl::UnscheduleInMemoryCompactionCallback);
-  }
+//  if (env_->GetBackgroundThreads(Env::Priority::HIGH) > 0) {
+//    InMemoryCompactionArg *icarg = new InMemoryCompactionArg;
+//    icarg->cfd = cfd;
+//    icarg->context = context;
+//    icarg->db_ = this;
+//    env_->Schedule(&DBImpl::ScheduleInMemoryCompaction, icarg, Env::Priority::HIGH, this,
+//                   &DBImpl::UnscheduleInMemoryCompactionCallback);
+//  }
+  InMemoryCompactionArg *icarg = new InMemoryCompactionArg;
+  icarg->cfd = cfd;
+  icarg->context = context;
+  icarg->db_ = this;
+  ScheduleInMemoryCompaction(icarg);
 
   InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,
                                      mutable_cf_options);
@@ -2031,7 +2036,7 @@ void DBImpl::ScheduleInMemoryCompaction(void* arg) {
   WriteContext* context = ca.context;
   DBImpl* db = ca.db_;
 
-  db->mutex_.Lock();
+  // db->mutex_.Lock();
 
   const MutableCFOptions mutable_cf_options = *cfd->GetLatestMutableCFOptions();
   if (!cfd->queued_for_flush() && !cfd->queued_for_compaction()) {
@@ -2167,7 +2172,7 @@ void DBImpl::ScheduleInMemoryCompaction(void* arg) {
                    "This cf is queued for flush or compaction!\n");
   }
 
-  db->mutex_.Unlock();
+  // db->mutex_.Unlock();
 }
 
 void DBImpl::UnscheduleInMemoryCompactionCallback(void* arg) {

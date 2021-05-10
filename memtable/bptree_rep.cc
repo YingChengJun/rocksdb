@@ -1,22 +1,24 @@
 //
 // Created by Chengjun Ying on 2021/5/6.
 //
-#include "rocksdb/memtablerep.h"
+#include <algorithm>
 
 #include "db/memtable.h"
 #include "memory/arena.h"
-
+#include "memtable/stl_wrappers.h"
+#include "rocksdb/memtablerep.h"
 
 namespace ROCKSDB_NAMESPACE {
 namespace {
 
-const size_t order = 3;
+using namespace stl_wrappers;
+const size_t order = 6;
 
 struct Node {
-  char* key[order];
-  Node* ptr[order];
-  Node* prev = nullptr;
-  Node* next = nullptr;
+  char *key[order];
+  Node *ptr[order];
+  Node *prev = nullptr;
+  Node *next = nullptr;
   size_t key_size = 0;
   size_t ptr_size = 0;
   bool IsLeafNode() const { return ptr_size == 0; }
@@ -28,11 +30,11 @@ struct Node {
       ptr[i] = nullptr;
     }
   }
-  void push_key(char* pkey) {
+  void push_key(char *pkey) {
     assert(key_size < order);
     key[key_size++] = pkey;
   }
-  void push_ptr(Node* pNode) {
+  void push_ptr(Node *pNode) {
     assert(ptr_size < order);
     ptr[ptr_size++] = pNode;
   }
@@ -40,8 +42,11 @@ struct Node {
 
 class BpTreeRep : public MemTableRep {
  public:
+  static KeyComparator &g_compare_;
   explicit BpTreeRep(const KeyComparator &compare, Allocator *allocator)
-      : MemTableRep(allocator), compare_(compare){};
+      : MemTableRep(allocator), compare_(compare) {
+    g_compare_ = compare;
+  };
   void Insert(KeyHandle handle) override;
   void Bulkload() override;
   bool Contains(const char *key) const override;
@@ -55,9 +60,7 @@ class BpTreeRep : public MemTableRep {
   class Iterator : public MemTableRep::Iterator {
    public:
     ~Iterator() override{};
-    Iterator(BpTreeRep* bpTreeRep) {
-      SetBpTree(bpTreeRep);
-    }
+    Iterator(BpTreeRep *bpTreeRep) { SetBpTree(bpTreeRep); }
     bool Valid() const override { return cur_node != nullptr; }
     const char *key() const override {
       assert(Valid());
@@ -84,8 +87,8 @@ class BpTreeRep : public MemTableRep {
     }
     void Seek(const Slice &internal_key, const char *memtable_key) override {
       const char *encoded_key = (memtable_key != nullptr)
-                                ? memtable_key
-                                : EncodeKey(&tmp_, internal_key);
+                                    ? memtable_key
+                                    : EncodeKey(&tmp_, internal_key);
       bpTree_->FindGreaterOrEqual(cur_node, cur_index, bpTree_->root_,
                                   encoded_key);
     }
@@ -143,6 +146,7 @@ void rocksdb::BpTreeRep::Insert(KeyHandle handle) {
 }
 
 void rocksdb::BpTreeRep::Bulkload() {
+  std::sort(keys_.begin(), keys_.end(), Compare(compare_));
   ConstructLeafNode();
   ConstructBpTree(leaf_head_, leaf_tail_);
 }
@@ -153,6 +157,7 @@ bool rocksdb::BpTreeRep::Contains(const char *key) const {
 
 void rocksdb::BpTreeRep::Get(const LookupKey &k, void *callback_args,
                              bool (*callback_func)(void *, const char *)) {
+  assert(immutable_);
   BpTreeRep::Iterator iter(this);
   Slice dummy_slice;
   for (iter.Seek(dummy_slice, k.memtable_key().data());
@@ -165,10 +170,9 @@ void rocksdb::BpTreeRep::MarkReadOnly() {
   immutable_ = true;
 }
 
-MemTableRep::Iterator* rocksdb::BpTreeRep::GetIterator(Arena *arena) {
-  void *mem =
-      arena ? arena->AllocateAligned(sizeof(BpTreeRep::Iterator))
-            : operator new(sizeof(BpTreeRep::Iterator));
+MemTableRep::Iterator *rocksdb::BpTreeRep::GetIterator(Arena *arena) {
+  void *mem = arena ? arena->AllocateAligned(sizeof(BpTreeRep::Iterator)) :
+                    operator new(sizeof(BpTreeRep::Iterator));
   return new (mem) BpTreeRep::Iterator(this);
 }
 
@@ -291,14 +295,12 @@ void rocksdb::BpTreeRep::FindGreaterOrEqual(Node *&ret, size_t &index,
 
 }  // namespace
 
-MemTableRep* BpTreeRepFactory::CreateMemTableRep(
-    const MemTableRep::KeyComparator& compare, Allocator* allocator,
-    const SliceTransform*, Logger* /*logger*/) {
+MemTableRep *BpTreeRepFactory::CreateMemTableRep(
+    const MemTableRep::KeyComparator &compare, Allocator *allocator,
+    const SliceTransform *, Logger * /*logger*/) {
   return new BpTreeRep(compare, allocator);
 }
 
-MemTableRepFactory* NewBpTreeRepFactory() {
-  return new BpTreeRepFactory;
-}
+MemTableRepFactory *NewBpTreeRepFactory() { return new BpTreeRepFactory; }
 
 }  // namespace ROCKSDB_NAMESPACE

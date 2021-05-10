@@ -111,7 +111,7 @@ class MemTable {
                     const ImmutableCFOptions& ioptions,
                     const MutableCFOptions& mutable_cf_options,
                     WriteBufferManager* write_buffer_manager,
-                    SequenceNumber earliest_seq, uint32_t column_family_id, bool dummy_with_bp_tree);
+                    SequenceNumber earliest_seq, uint32_t column_family_id, MemTableRepFactory* factory);
   // No copying allowed
   MemTable(const MemTable&) = delete;
   MemTable& operator=(const MemTable&) = delete;
