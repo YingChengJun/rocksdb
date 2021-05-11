@@ -28,6 +28,8 @@ struct ImmutableCFOptions {
   ImmutableCFOptions(const ImmutableDBOptions& db_options,
                      const ColumnFamilyOptions& cf_options);
 
+  int compaction_threshold;
+
   CompactionStyle compaction_style;
 
   CompactionPri compaction_pri;

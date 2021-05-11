@@ -1969,11 +1969,12 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
 // Note: 在切换到新的Memtable后，取出该CF中所有没做过Compaction的Imm进行合并
 // 暂时没考虑Range Delete Table，测试时的操作应该仅包含Read和Write
 void DBImpl::ScheduleInMemoryCompaction(void* arg) {
-  const int compaction_threshold = 1;
   InMemoryCompactionArg ca = *(reinterpret_cast<InMemoryCompactionArg*>(arg));
   ColumnFamilyData* cfd = ca.cfd;
   WriteContext* context = ca.context;
   DBImpl* db = ca.db_;
+  size_t compaction_threshold = cfd->ioptions()->compaction_threshold;
+  ROCKS_LOG_INFO(db->immutable_db_options_.info_log, "--------compaction_threshold = %zu", compaction_threshold);
 
   db->mutex_.Lock();
 
@@ -2074,7 +2075,7 @@ void DBImpl::ScheduleInMemoryCompaction(void* arg) {
                      cfd->imm()->NumNotFlushed());
     } else {
       ROCKS_LOG_INFO(db->immutable_db_options_.info_log,
-                     "++++++++++ ImmutableTables picked for in memory compaction <= %d, "
+                     "++++++++++ ImmutableTables picked for in memory compaction <= %zu, "
                      "Not need to do "
                      "in memory compaction\n",
                      compaction_threshold);

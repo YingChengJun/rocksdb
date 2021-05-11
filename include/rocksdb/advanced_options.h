@@ -193,6 +193,9 @@ enum UpdateStatus {    // Return status For inplace update callback
 };
 
 struct AdvancedColumnFamilyOptions {
+
+  int compaction_threshold = 1;
+
   // The maximum number of write buffers that are built up in memory.
   // The default and the minimum number is 2, so that when 1 write buffer
   // is being flushed to storage, new writes can continue to the other

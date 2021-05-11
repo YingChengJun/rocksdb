@@ -1412,6 +1412,8 @@ DEFINE_bool(read_with_latest_user_timestamp, true,
             "If true, always use the current latest timestamp for read. If "
             "false, choose a random timestamp from the past.");
 
+DEFINE_int32(compaction_threshold, 1, "compaction threshold");
+
 static const bool FLAGS_soft_rate_limit_dummy __attribute__((__unused__)) =
     RegisterFlagValidator(&FLAGS_soft_rate_limit, &ValidateRateLimit);
 
@@ -3756,6 +3758,8 @@ class Benchmark {
     Options& options = *opts;
 
     assert(db_.db == nullptr);
+
+    options.compaction_threshold = FLAGS_compaction_threshold;
 
     options.env = FLAGS_env;
     options.max_open_files = FLAGS_open_files;
