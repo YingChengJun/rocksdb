@@ -12,61 +12,40 @@ namespace ROCKSDB_NAMESPACE {
 namespace {
 
 using namespace stl_wrappers;
-const size_t order = 64;
-const size_t max_key_size = 32;
-const size_t buffer_size = 1024;
+const uint32_t order = 64;
+const uint32_t max_build_buffer_size = 32 * order;
 
 struct Node {
-  char* key[order][max_key_size];
-  Node *ptr[order];
-  Node *prev;
-  Node *next;
-  size_t key_size;
-  size_t ptr_size;
-  virtual ~Node(){};
-  virtual bool IsLeafNode() const = 0;
-  virtual void InitNode() {
-    key_size = ptr_size = 0;
-    prev = next = nullptr;
-    for (size_t i = 0; i < order; i++) {
-      ptr[i] = nullptr;
+  uint32_t key_nums = 0;
+  char *key_buf = nullptr;
+  Node *next = nullptr;
+  static char *NextKey(char *cur_p) {
+    uint32_t key_len = 0;
+    const char *p_internal_key = GetVarint32Ptr(cur_p, cur_p + 5, &key_len);
+    // assert(key_len >= 8);
+    return const_cast<char *>(p_internal_key) + key_len;
+  }
+  char *GetKey(uint32_t index) const {
+    // assert(key_buf != nullptr);
+    // assert(index < key_nums);
+    char *p = key_buf;
+    for (uint32_t i = 0; i < index; i++) {
+      p = NextKey(p);
     }
+    return p;
   }
-  virtual void push_key(char *pkey) = 0;
-  void push_ptr(Node *pNode) {
-    assert(ptr_size < order);
-    ptr[ptr_size++] = pNode;
-  }
+  virtual bool IsLeafNode() const = 0;
+  virtual ~Node() { delete[] key_buf; }
 };
 
 struct LeafNode : Node {
-  char *value[order];
+  std::vector<char *> value_ptr;
   bool IsLeafNode() const override { return true; }
-  void InitNode() override {
-    Node::InitNode();
-    for (size_t i = 0; i < order; i++) {
-      value[i] = nullptr;
-    }
-  }
-  void push_key(char *pkey) override {
-    assert(key_size < order);
-    uint32_t key_length = 0;
-    GetVarint32Ptr(pkey, pkey + 5, &key_length);
-    assert(key_length >= 8 && key_length + 5 < max_key_size);
-    // push memtable key
-    // klength + user_key + seq + value_type
-    memcpy(key[key_size], pkey, key_length + 5);
-    value[key_size] = pkey;
-    key_size++;
-  }
 };
 
 struct InternalNode : Node {
+  std::vector<Node *> node_ptr;
   bool IsLeafNode() const override { return false; }
-  void push_key(char *pkey) override {
-    assert(key_size < order);
-    memcpy(key[key_size++], pkey, max_key_size);
-  }
 };
 
 class BpTreeRep : public MemTableRep {
@@ -93,29 +72,21 @@ class BpTreeRep : public MemTableRep {
     Iterator(BpTreeRep *bpTreeRep) { SetBpTree(bpTreeRep); }
     bool Valid() const override { return cur_node != nullptr; }
     const char *key() const override {
-      assert(Valid());
-      assert(cur_node->IsLeafNode());
-      return dynamic_cast<LeafNode *>(cur_node)->value[cur_index];
+      // assert(Valid());
+      // assert(cur_node->IsLeafNode());
+      return dynamic_cast<LeafNode *>(cur_node)->value_ptr[cur_index];
     }
     void Next() override {
-      assert(Valid());
-      if (cur_index == cur_node->key_size - 1) {
+      // assert(Valid());
+      if (cur_index == cur_node->key_nums - 1) {
         cur_node = cur_node->next;
         cur_index = 0;
       } else {
         cur_index++;
       }
-      assert(cur_node == nullptr || cur_index < cur_node->key_size);
+      // assert(cur_node == nullptr || cur_index < cur_node->key_nums);
     }
-    void Prev() override {
-      assert(Valid());
-      if (cur_index == 0) {
-        cur_node = cur_node->prev;
-        cur_index = cur_node->key_size - 1;
-      } else {
-        cur_index--;
-      }
-    }
+    void Prev() override { assert(false); }
     void Seek(const Slice &internal_key, const char *memtable_key) override {
       const char *encoded_key = (memtable_key != nullptr)
                                     ? memtable_key
@@ -133,7 +104,7 @@ class BpTreeRep : public MemTableRep {
     }
     void SeekToLast() override {
       cur_node = bpTree_->leaf_tail_;
-      cur_index = bpTree_->leaf_tail_->key_size - 1;
+      cur_index = bpTree_->leaf_tail_->key_nums - 1;
     }
     void SetBpTree(BpTreeRep *bpTreeRep) {
       assert(bpTreeRep != nullptr);
@@ -145,7 +116,7 @@ class BpTreeRep : public MemTableRep {
    private:
     BpTreeRep *bpTree_;
     Node *cur_node;
-    size_t cur_index;
+    uint32_t cur_index;
 
    protected:
     std::string tmp_;  // For passing to EncodeKey
@@ -153,7 +124,7 @@ class BpTreeRep : public MemTableRep {
 
  private:
   friend class Iterator;
-  size_t memory_usage_ = 0;
+  uint32_t memory_usage_ = 0;
   bool immutable_ = false;
   std::vector<char *> keys_;
   Node *leaf_head_ = nullptr;
@@ -166,7 +137,7 @@ class BpTreeRep : public MemTableRep {
   void ConstructLeafNode();
   void ConstructBpTree(Node *start, Node *end);
   Status Find(Node *cur, const char *key) const;
-  void FindGreaterOrEqual(Node *&ret, size_t &index, Node *cur,
+  void FindGreaterOrEqual(Node *&ret, uint32_t &index, Node *cur,
                           const char *key) const;
 };
 
@@ -189,7 +160,7 @@ bool rocksdb::BpTreeRep::Contains(const char *key) const {
 
 void rocksdb::BpTreeRep::Get(const LookupKey &k, void *callback_args,
                              bool (*callback_func)(void *, const char *)) {
-  assert(immutable_);
+  // assert(immutable_);
   BpTreeRep::Iterator iter(this);
   Slice dummy_slice;
   // Note: Find internal key instead of memtable key
@@ -211,21 +182,36 @@ MemTableRep::Iterator *rocksdb::BpTreeRep::GetIterator(Arena *arena) {
 
 void rocksdb::BpTreeRep::ConstructLeafNode() {
   auto iter = keys_.begin();
+  char build_buf[max_build_buffer_size];
+  // build each leaf node
   while (iter != keys_.end()) {
-    size_t rep = 0;
-    //    Node *node = reinterpret_cast<LeafNode
-    //    *>(allocator_->Allocate(sizeof(LeafNode)));
-    Node *node = new LeafNode();
+    auto *node = new LeafNode();
     allocated.push_back(node);
-    node->InitNode();
-    for (; rep < order && iter != keys_.end(); rep++, iter++) {
-      node->push_key(*iter);
+    uint32_t key_nums = 0;
+    auto p_buf = build_buf;
+    // each puts nums_order keys
+    for (; key_nums < order && iter != keys_.end(); key_nums++, iter++) {
+      // push key handle(key & value) as value
+      node->value_ptr.push_back(*iter);
+      // fetch memtable_key from key handle
+      uint32_t key_len = 0;
+      const char *p_internal_key = GetVarint32Ptr(*iter, *iter + 5, &key_len);
+      // assert(key_len >= 8);
+      // assert(p_internal_key - *iter >= 1);
+      // assert(p_internal_key - *iter <= 5);
+      // now key_len represents memtable_key size
+      uint32_t memtable_key_len = key_len + p_internal_key - *iter;
+      // copy memtable_key to buffer
+      memcpy(p_buf, *iter, memtable_key_len);
+      p_buf = p_buf + memtable_key_len;
     }
+    node->key_nums = key_nums;
+    node->key_buf = new char[p_buf - build_buf];
+    memcpy(node->key_buf, build_buf, p_buf - build_buf);
     if (leaf_head_ == nullptr) {
       leaf_head_ = leaf_tail_ = node;
     } else {
       leaf_tail_->next = node;
-      node->prev = leaf_tail_;
       leaf_tail_ = node;
     }
   }
@@ -237,25 +223,40 @@ void rocksdb::BpTreeRep::ConstructBpTree(Node *start, Node *end) {
     root_ = start;
     return;
   }
-  Node *p = start;
+  Node *loop_p = start;
   Node *head = nullptr;
   Node *tail = nullptr;
-  while (p != nullptr) {
-    size_t rep = 0;
-    //    Node *node = reinterpret_cast<InternalNode
-    //    *>(allocator_->Allocate(sizeof(InternalNode)));
-    Node *node = new InternalNode;
+  char build_buf[max_build_buffer_size];
+  // build each internal node
+  while (loop_p != nullptr) {
+    auto *node = new InternalNode();
     allocated.push_back(node);
-    node->InitNode();
-    for (; rep < order && p != nullptr; rep++, p = p->next) {
-      node->push_key(p->key[0]);
-      node->push_ptr(p);
+    uint32_t key_nums = 0;
+    auto p_buf = build_buf;
+    // each puts nums_order keys
+    for (; key_nums < order && loop_p != nullptr;
+         key_nums++, loop_p = loop_p->next) {
+      node->node_ptr.push_back(loop_p);
+      // fetch memtable_key from key handle
+      uint32_t key_len = 0;
+      const char *p_internal_key =
+          GetVarint32Ptr(loop_p->key_buf, loop_p->key_buf + 5, &key_len);
+      // assert(key_len >= 8);
+      // assert(p_internal_key - loop_p->key_buf >= 1);
+      // assert(p_internal_key - loop_p->key_buf <= 5);
+      // now key_len represents memtable_key size
+      uint32_t memtable_key_len = key_len + p_internal_key - loop_p->key_buf;
+      // copy memtable_key to buffer
+      memcpy(p_buf, loop_p->key_buf, memtable_key_len);
+      p_buf = p_buf + memtable_key_len;
     }
+    node->key_nums = key_nums;
+    node->key_buf = new char[p_buf - build_buf];
+    memcpy(node->key_buf, build_buf, p_buf - build_buf);
     if (head == nullptr) {
       head = tail = node;
     } else {
       tail->next = node;
-      node->prev = tail;
       tail = node;
     }
   }
@@ -263,50 +264,33 @@ void rocksdb::BpTreeRep::ConstructBpTree(Node *start, Node *end) {
 }
 
 Status rocksdb::BpTreeRep::Find(Node *cur, const char *key) const {
-  if (compare_(key, cur->key[0]) < 0) {
-    return Status::NotFound();
-  }
-  for (size_t i = 0; i < cur->key_size; i++) {
-    if (i == cur->key_size - 1) {
-      if (cur->IsLeafNode()) {
-        // leaf node
-        if (compare_(key, cur->key[i]) == 0) {
-          return Status::OK();
-        } else {
-          return Status::NotFound();
-        }
-      } else {
-        // none leaf
-        return Find(cur->ptr[i], key);
-      }
-    } else if (compare_(key, cur->key[i]) >= 0 &&
-               compare_(key, cur->key[i + 1]) < 0) {
-      if (cur->IsLeafNode()) {
-        // leaf node
-        if (compare_(key, cur->key[i]) == 0) {
-          return Status::OK();
-        } else {
-          return Status::NotFound();
-        }
-      } else {
-        // none leaf
-        return Find(cur->ptr[i], key);
-      }
-    }
-  }
-  return Status::NotFound();
+  Node *ret = nullptr;
+  uint32_t index = 0;
+  FindGreaterOrEqual(ret, index, cur, key);
+  bool flag = (ret != nullptr) && compare_(key, ret->GetKey(index)) == 0;
+  return flag ? Status::OK() : Status::NotFound();
 }
 
-void rocksdb::BpTreeRep::FindGreaterOrEqual(Node *&ret, size_t &index,
+void rocksdb::BpTreeRep::FindGreaterOrEqual(Node *&ret, uint32_t &index,
                                             Node *cur, const char *key) const {
   // leaf node
   if (cur->IsLeafNode()) {
     while (cur != nullptr) {
-      for (size_t i = 0; i < cur->key_size; i++) {
-        if (compare_(cur->key[i], key) >= 0) {
+      char *cur_key = cur->GetKey(0);
+      // condition that the key is less than any node keys
+      if (compare_(key, cur_key) <= 0) {
+        ret = cur;
+        index = 0;
+        return;
+      }
+      for (uint32_t i = 0; i < cur->key_nums; i++) {
+        if (compare_(cur_key, key) >= 0) {
           ret = cur;
           index = i;
           return;
+        }
+        if (LIKELY(i != cur->key_nums - 1)) {
+          cur_key = Node::NextKey(cur_key);
         }
       }
       cur = cur->next;
@@ -316,15 +300,27 @@ void rocksdb::BpTreeRep::FindGreaterOrEqual(Node *&ret, size_t &index,
     return;
   }
   // none leaf node
-  for (size_t i = 0; i < cur->key_size; i++) {
-    if (i == cur->key_size - 1 && compare_(key, cur->key[i]) >= 0) {
-      FindGreaterOrEqual(ret, index, cur->ptr[i], key);
+  char *cur_key = cur->GetKey(0);
+  // condition that the key is less than any node keys
+  if (compare_(key, cur_key) <= 0) {
+    FindGreaterOrEqual(ret, index,
+                       dynamic_cast<InternalNode *>(cur)->node_ptr[0], key);
+    return;
+  }
+  for (uint32_t i = 0; i < cur->key_nums; i++) {
+    if (i == cur->key_nums - 1) {
+      // assert(cur->key_nums != 1 && compare_(key, cur_key) >= 0);
+      FindGreaterOrEqual(ret, index,
+                         dynamic_cast<InternalNode *>(cur)->node_ptr[i], key);
       return;
     }
-    if (compare_(key, cur->key[i]) >= 0 && compare_(key, cur->key[i + 1]) < 0) {
-      FindGreaterOrEqual(ret, index, cur->ptr[i], key);
+    char *next_key = Node::NextKey(cur_key);
+    if (compare_(key, cur_key) >= 0 && compare_(key, next_key) < 0) {
+      FindGreaterOrEqual(ret, index,
+                         dynamic_cast<InternalNode *>(cur)->node_ptr[i], key);
       return;
     }
+    cur_key = next_key;
   }
   index = 0;
   ret = nullptr;
