@@ -13,40 +13,66 @@ namespace {
 
 using namespace stl_wrappers;
 const size_t order = 64;
+const size_t max_key_size = 32;
+const size_t buffer_size = 1024;
 
 struct Node {
-  char *key[order];
+  char* key[order][max_key_size];
   Node *ptr[order];
-  Node *prev = nullptr;
-  Node *next = nullptr;
-  size_t key_size = 0;
-  size_t ptr_size = 0;
-  bool IsLeafNode() const { return ptr_size == 0; }
-  void InitNode() {
+  Node *prev;
+  Node *next;
+  size_t key_size;
+  size_t ptr_size;
+  virtual ~Node(){};
+  virtual bool IsLeafNode() const = 0;
+  virtual void InitNode() {
     key_size = ptr_size = 0;
     prev = next = nullptr;
     for (size_t i = 0; i < order; i++) {
-      key[i] = nullptr;
       ptr[i] = nullptr;
     }
   }
-  void push_key(char *pkey) {
-    assert(key_size < order);
-    key[key_size++] = pkey;
-  }
+  virtual void push_key(char *pkey) = 0;
   void push_ptr(Node *pNode) {
     assert(ptr_size < order);
     ptr[ptr_size++] = pNode;
   }
 };
 
+struct LeafNode : Node {
+  char *value[order];
+  bool IsLeafNode() const override { return true; }
+  void InitNode() override {
+    Node::InitNode();
+    for (size_t i = 0; i < order; i++) {
+      value[i] = nullptr;
+    }
+  }
+  void push_key(char *pkey) override {
+    assert(key_size < order);
+    uint32_t key_length = 0;
+    GetVarint32Ptr(pkey, pkey + 5, &key_length);
+    assert(key_length >= 8 && key_length + 5 < max_key_size);
+    // push memtable key
+    // klength + user_key + seq + value_type
+    memcpy(key[key_size], pkey, key_length + 5);
+    value[key_size] = pkey;
+    key_size++;
+  }
+};
+
+struct InternalNode : Node {
+  bool IsLeafNode() const override { return false; }
+  void push_key(char *pkey) override {
+    assert(key_size < order);
+    memcpy(key[key_size++], pkey, max_key_size);
+  }
+};
+
 class BpTreeRep : public MemTableRep {
  public:
-  static KeyComparator &g_compare_;
   explicit BpTreeRep(const KeyComparator &compare, Allocator *allocator)
-      : MemTableRep(allocator), compare_(compare) {
-    g_compare_ = compare;
-  };
+      : MemTableRep(allocator), compare_(compare){};
   void Insert(KeyHandle handle) override;
   void Bulkload() override;
   bool Contains(const char *key) const override;
@@ -55,7 +81,11 @@ class BpTreeRep : public MemTableRep {
   void MarkReadOnly() override;
   size_t ApproximateMemoryUsage() override { return memory_usage_; }
   MemTableRep::Iterator *GetIterator(Arena *arena) override;
-  ~BpTreeRep() override {}
+  ~BpTreeRep() override {
+    for (auto &n : allocated) {
+      delete n;
+    }
+  }
 
   class Iterator : public MemTableRep::Iterator {
    public:
@@ -64,7 +94,8 @@ class BpTreeRep : public MemTableRep {
     bool Valid() const override { return cur_node != nullptr; }
     const char *key() const override {
       assert(Valid());
-      return cur_node->key[cur_index];
+      assert(cur_node->IsLeafNode());
+      return dynamic_cast<LeafNode *>(cur_node)->value[cur_index];
     }
     void Next() override {
       assert(Valid());
@@ -130,6 +161,7 @@ class BpTreeRep : public MemTableRep {
   Node *root_ = nullptr;
   mutable port::RWMutex rwlock_;
   const KeyComparator &compare_;
+  std::vector<Node *> allocated;
 
   void ConstructLeafNode();
   void ConstructBpTree(Node *start, Node *end);
@@ -160,6 +192,7 @@ void rocksdb::BpTreeRep::Get(const LookupKey &k, void *callback_args,
   assert(immutable_);
   BpTreeRep::Iterator iter(this);
   Slice dummy_slice;
+  // Note: Find internal key instead of memtable key
   for (iter.Seek(dummy_slice, k.memtable_key().data());
        iter.Valid() && callback_func(callback_args, iter.key()); iter.Next()) {
   }
@@ -180,8 +213,10 @@ void rocksdb::BpTreeRep::ConstructLeafNode() {
   auto iter = keys_.begin();
   while (iter != keys_.end()) {
     size_t rep = 0;
-    Node *node =
-        reinterpret_cast<Node *>(allocator_->AllocateAligned(sizeof(Node)));
+    //    Node *node = reinterpret_cast<LeafNode
+    //    *>(allocator_->Allocate(sizeof(LeafNode)));
+    Node *node = new LeafNode();
+    allocated.push_back(node);
     node->InitNode();
     for (; rep < order && iter != keys_.end(); rep++, iter++) {
       node->push_key(*iter);
@@ -207,8 +242,10 @@ void rocksdb::BpTreeRep::ConstructBpTree(Node *start, Node *end) {
   Node *tail = nullptr;
   while (p != nullptr) {
     size_t rep = 0;
-    Node *node =
-        reinterpret_cast<Node *>(allocator_->AllocateAligned(sizeof(Node)));
+    //    Node *node = reinterpret_cast<InternalNode
+    //    *>(allocator_->Allocate(sizeof(InternalNode)));
+    Node *node = new InternalNode;
+    allocated.push_back(node);
     node->InitNode();
     for (; rep < order && p != nullptr; rep++, p = p->next) {
       node->push_key(p->key[0]);
