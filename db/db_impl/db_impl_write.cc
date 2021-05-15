@@ -1939,6 +1939,8 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   new_mem->Ref();
   cfd->SetMemtable(new_mem);
 
+  ROCKS_LOG_INFO(immutable_db_options_.info_log, "++++++++++ SYNC POINT 1!");
+
   // Do In Memory Compaction
   if (env_->GetBackgroundThreads(Env::Priority::HIGH) > 0) {
     InMemoryCompactionArg *icarg = new InMemoryCompactionArg;
@@ -1949,8 +1951,13 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
                    &DBImpl::UnscheduleInMemoryCompactionCallback);
   }
 
+  ROCKS_LOG_INFO(immutable_db_options_.info_log, "++++++++++ SYNC POINT 2!");
+
   InstallSuperVersionAndScheduleWork(cfd, &context->superversion_context,
                                      mutable_cf_options);
+
+  ROCKS_LOG_INFO(immutable_db_options_.info_log, "++++++++++ SYNC POINT 3!");
+
 
 #ifndef ROCKSDB_LITE
   mutex_.Unlock();
@@ -1975,8 +1982,8 @@ void DBImpl::ScheduleInMemoryCompaction(void* arg) {
   DBImpl* db = ca.db_;
   size_t compaction_threshold = cfd->ioptions()->compaction_threshold;
   ROCKS_LOG_INFO(db->immutable_db_options_.info_log, "--------compaction_threshold = %zu", compaction_threshold);
-
-  db->mutex_.Lock();
+  ROCKS_LOG_INFO(db->immutable_db_options_.info_log, "++++++++++ SYNC POINT 4!");
+//  db->mutex_.Lock();
 
   const MutableCFOptions mutable_cf_options = *cfd->GetLatestMutableCFOptions();
   if (!cfd->queued_for_flush() && !cfd->queued_for_compaction()) {
@@ -2057,11 +2064,25 @@ void DBImpl::ScheduleInMemoryCompaction(void* arg) {
       }
 
       merged->getMemTable()->Bulkload();
+      merged->setInMemoryCompactioned(true);
 
       // remove all immutable tables except the latest & add merged memtable
-      merged->setInMemoryCompactioned(true);
-      cfd->imm()->RemoveMemTablesAfterInMemoryCompaction(&imms, &context->memtables_to_free_);
-      cfd->imm()->Add(merged, &context->memtables_to_free_);
+      ROCKS_LOG_INFO(db->immutable_db_options_.info_log, "++++++++++ SYNC POINT 5!");
+      db->mutex_.Lock();
+      SuperVersionContext superVersionContext;
+      {
+        ROCKS_LOG_INFO(db->immutable_db_options_.info_log, "++++++++++ SYNC POINT 6!");
+        WriteContext writeContext;
+        cfd->imm()->Add(merged, &writeContext.memtables_to_free_);
+        cfd->imm()->RemoveMemTablesAfterInMemoryCompaction(&imms, &writeContext.memtables_to_free_);
+//        cfd->ResetThreadLocalSuperVersions();
+        superVersionContext.NewSuperVersion();
+        cfd->InstallSuperVersion(&superVersionContext, &db->mutex_);
+        ROCKS_LOG_INFO(db->immutable_db_options_.info_log, "++++++++++ SYNC POINT 7!");
+      }
+      superVersionContext.Clean();
+      db->mutex_.Unlock();
+      ROCKS_LOG_INFO(db->immutable_db_options_.info_log, "++++++++++ SYNC POINT 8!");
 
       // record finish time
       ROCKS_LOG_INFO(
@@ -2085,7 +2106,7 @@ void DBImpl::ScheduleInMemoryCompaction(void* arg) {
                    "++++++++++ This cf is queued for flush or compaction!\n");
   }
 
-  db->mutex_.Unlock();
+//  db->mutex_.Unlock();
 }
 
 void DBImpl::UnscheduleInMemoryCompactionCallback(void* arg) {

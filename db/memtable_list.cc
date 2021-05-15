@@ -380,13 +380,14 @@ void MemTableList::GetMemtablesForInMemoryCompaction(autovector<MemTable*>* ret)
 }
 
 void MemTableList::RemoveMemTablesAfterInMemoryCompaction(autovector<MemTable*>* m,
-                                 autovector<MemTable*>* to_delete) {
+                                                          autovector<MemTable*>* to_delete) {
   auto& memlist_ = current_->memlist_;
   for (auto it = m->begin(); it != m->end(); it++) {
-    current_->memlist_.remove(*it);
-    current_->UnrefMemTable(to_delete, *it);
+    current_->Remove(*it, to_delete);
+    --num_flush_not_started_;
   }
-  num_flush_not_started_ -= m->size();
+  UpdateCachedValuesFromMemTableListVersion();
+  ResetTrimHistoryNeeded();
 }
 
 void MemTableList::RollbackMemtableFlush(const autovector<MemTable*>& mems,
